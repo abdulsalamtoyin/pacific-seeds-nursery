@@ -1,0 +1,28 @@
+# Runtime dependencies for the Pacific Seeds Nursery Fieldbook.
+# Used by:
+#   • FastAPI backend (backend/app.py)
+#   • CLI scripts    (scripts/nursery_init.py, fieldbook_export.py, map_parser.py)
+#   • Excel workflow (excel_workflow/build_workbooks.py, bake_vba.py, …)
+#   • Windows launcher (dist_windows/launcher.py)
+
+# ── Web framework ─────────────────────────────────────────
+fastapi>=0.110
+uvicorn[standard]>=0.27
+python-multipart>=0.0.9        # FastAPI file uploads
+pydantic>=2.6                  # request/response models
+
+# ── Excel I/O ─────────────────────────────────────────────
+openpyxl>=3.1                  # read PRISM exports, write workbooks
+
+# ── QR generation + PDF output ───────────────────────────
+qrcode[pil]>=7.4               # QR codes
+reportlab>=4.0                 # branded PDF packet labels + quick-ref PDF
+pillow>=10.0                   # imaging (used by qrcode and reportlab)
+
+# ── Desktop launcher (Windows .exe) ──────────────────────
+pystray>=0.19                  # system-tray icon menu
+
+# ── Optional / dev (uncomment to install) ────────────────
+# pyinstaller>=6.0             # only needed when building the Windows .exe
+# oletools>=0.60               # introspect vbaProject.bin (Excel workflow dev)
+# xlwings>=0.35                # Mac VBA installer dev (broken on Mac, kept for reference)

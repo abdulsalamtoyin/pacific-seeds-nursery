@@ -1,0 +1,49 @@
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Virtual environments (built locally; large; not portable)
+.venv/
+.venv-win/
+venv/
+env/
+
+# PyInstaller build outputs
+build/
+dist/
+
+# SQLite + generated data
+poc/data/
+poc/output/
+poc/excel_workflow/output/*.xlsx
+poc/excel_workflow/output/*.xlsm
+poc/excel_workflow/output/~$*
+*.sqlite
+*.sqlite-journal
+
+# Excel temp files
+~$*.xlsx
+~$*.xlsm
+~$*.docx
+
+# Editor / IDE
+.vscode/
+.idea/
+
+# Misc
+*.log
+
+# Local zip distributions (rebuild from sources on demand)
+poc.zip
+poc/excel_workflow/PacificSeeds_NurseryWorkflow.zip
+
+# Real PRISM exports — sensitive breeding data, keep local only.
+# (Remove these lines if you want to ship sample data with the repo.)
+/AUGT1-26S-IMI.xlsx
+/AUQDGT01-26W-IMI.xlsx

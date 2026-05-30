@@ -1,0 +1,52 @@
+name: Build Windows .exe
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:    # manual trigger
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        working-directory: poc
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller pystray pillow
+
+      - name: Build with PyInstaller
+        working-directory: poc
+        run: |
+          pyinstaller dist_windows/PacificSeeds.spec --clean --noconfirm
+
+      - name: Upload .exe as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: PacificSeeds-Windows
+          path: poc/dist/PacificSeeds.exe
+          retention-days: 30
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build installer
+        working-directory: poc
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" dist_windows/installer.iss
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: PacificSeeds-Windows-Installer
+          path: poc/dist/installer/*.exe
+          retention-days: 30

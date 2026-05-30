@@ -1,0 +1,842 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>How it works · Pacific Seeds Nursery Workflow</title>
+<link rel="icon" href="/static/ps-logo.svg" type="image/svg+xml" />
+<style>
+  :root {
+    --bg:#ffffff; --surface:#f3f7fb; --card:#ffffff; --border:#d8e3ed;
+    --ink:#092A40; --ink-soft:#34526e; --muted:#5a7896;
+    --accent:#0678CD; --accent-dark:#0075BD; --accent-light:#e9f3fc;
+    --sky:#3AB3E5; --skylight:#8FCEEE;
+    --navy:#092A40; --warn:#b8870c; --warn-bg:#fff7e0;
+    --danger:#e45138; --wheat:#DDB318;
+    --ok:#28a745; --ok-bg:#e6f5ea;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin:0; padding:0; background:var(--surface); color:var(--ink);
+               font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+               line-height: 1.55; }
+  header.brand { padding: 12px 16px; background:var(--navy); border-bottom:3px solid var(--sky);
+           display:flex; align-items:center; gap:12px; color:#fff; }
+  header.brand .logo { height:28px; }
+  header.brand .titles { display:flex; flex-direction:column; line-height:1.1; }
+  header.brand .titles .sub { font-size:11px; color:var(--sky); letter-spacing:1.2px;
+                              text-transform:uppercase; font-weight:600; }
+  header.brand .titles .main { font-size:15px; font-weight:600; }
+  header.brand .grow { flex:1; }
+  header.brand .open-app { background:var(--accent); color:#fff; text-decoration:none;
+                           font-size:13px; font-weight:600; padding:9px 18px;
+                           border-radius:8px; box-shadow:0 1px 4px rgba(0,0,0,0.3);
+                           transition: all 0.15s; }
+  header.brand .open-app:hover { background:var(--accent-dark);
+                                 box-shadow:0 2px 8px rgba(0,0,0,0.4);
+                                 transform: translateY(-1px); }
+
+  .layout { display:grid; grid-template-columns: 1fr; max-width: 1400px; margin: 0 auto; }
+  @media (min-width: 1024px) {
+    .layout { grid-template-columns: 260px 1fr; gap: 0; }
+  }
+
+  aside.toc { padding: 24px 16px; border-right:1px solid var(--border); background:#fff;
+              max-height: calc(100vh - 60px); overflow-y:auto;
+              position: sticky; top: 0; display:none; }
+  @media (min-width: 1024px) { aside.toc { display:block; } }
+  aside.toc h3 { font-size:11px; text-transform:uppercase; letter-spacing:0.6px;
+                 color:var(--muted); margin: 16px 0 6px; font-weight:700; }
+  aside.toc h3:first-child { margin-top:0; }
+  aside.toc a { display:block; padding: 5px 8px; font-size:13px; color:var(--ink-soft);
+                text-decoration:none; border-radius:6px; }
+  aside.toc a:hover { background:var(--accent-light); color:var(--accent-dark); }
+  aside.toc a.section { font-weight:600; color:var(--navy); }
+
+  main { padding: 0 28px 80px; max-width: 100%; }
+  @media (min-width: 768px) { main { padding: 0 48px 80px; } }
+  h1 { color:var(--navy); margin: 0 0 6px; font-size: 28px; }
+  h1 + p.lead { color:var(--ink-soft); font-size:15px; margin: 0 0 24px;
+                max-width: 720px; }
+
+  /* ─── Hero section ─── */
+  .hero { background: linear-gradient(135deg, #fff 0%, #f3f9fd 100%);
+          border:1px solid var(--border); border-radius:18px;
+          padding:36px 32px; margin: 28px 0 36px;
+          box-shadow:0 4px 16px rgba(9,42,64,0.06);
+          position:relative; overflow:hidden; }
+  .hero::before { content:""; position:absolute; top:-60px; right:-80px;
+                  width:320px; height:320px; border-radius:50%;
+                  background:radial-gradient(circle, rgba(58,179,229,0.18), transparent 70%); }
+  .hero-grid { display:grid; grid-template-columns: 1fr; gap:26px;
+               position:relative; z-index:1; align-items:center; }
+  @media (min-width: 820px) { .hero-grid { grid-template-columns: 1.4fr 1fr; } }
+  .hero-pill { display:inline-block; font-size:11px; font-weight:700;
+               text-transform:uppercase; letter-spacing:0.8px;
+               color:var(--accent-dark); background:var(--accent-light);
+               padding:5px 12px; border-radius:99px; }
+  .hero-h1 { font-size:38px; line-height:1.12; color:var(--navy);
+             margin:14px 0 14px; font-weight:700; letter-spacing:-0.6px; }
+  @media (max-width: 600px) { .hero-h1 { font-size:28px; } }
+  .hero-sub { color:var(--ink-soft); font-size:16px; line-height:1.6;
+              max-width:580px; margin:0 0 24px; }
+  .hero-cta { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  .hero-cta a.primary { background:var(--accent); color:#fff; text-decoration:none;
+                        font-size:15px; padding:13px 26px; font-weight:600;
+                        border-radius:10px; box-shadow:0 2px 8px rgba(6,120,205,0.35);
+                        transition: all 0.15s; }
+  .hero-cta a.primary:hover { background:var(--accent-dark);
+                              box-shadow:0 4px 12px rgba(6,120,205,0.45);
+                              transform: translateY(-1px); }
+  .hero-cta a.link { color:var(--accent); text-decoration:none; font-size:14px;
+                     font-weight:500; padding:6px 0; }
+  .hero-cta a.link:hover { color:var(--accent-dark); text-decoration:underline; }
+  .hero-art { display:flex; justify-content:center; align-items:center; }
+  .hero-art svg { width:100%; max-width:340px; height:auto;
+                  filter: drop-shadow(0 8px 16px rgba(9,42,64,0.12)); }
+
+  /* Three-phase strip below hero */
+  .phase-strip { display:grid; grid-template-columns: 1fr; gap:14px;
+                 margin-bottom:36px; }
+  @media (min-width: 760px) { .phase-strip { grid-template-columns: 1fr 1fr 1fr; } }
+  .phase-tile { background:#fff; border:1px solid var(--border); border-radius:12px;
+                padding:18px 16px; }
+  .phase-tile-num { font-size:10px; font-weight:700; text-transform:uppercase;
+                    letter-spacing:0.6px; padding:3px 9px; border-radius:99px;
+                    color:#fff; display:inline-block; }
+  .phase-tile.p1 .phase-tile-num { background:var(--accent); }
+  .phase-tile.p2 .phase-tile-num { background:var(--accent-dark); }
+  .phase-tile.p3 .phase-tile-num { background:var(--navy); }
+  .phase-tile-title { font-size:16px; font-weight:600; color:var(--navy);
+                      margin:10px 0 6px; }
+  .phase-tile-body  { font-size:13px; color:var(--ink-soft); line-height:1.5; }
+  h2 { color:var(--navy); font-size: 22px; margin: 40px 0 10px;
+       padding-top: 16px; border-top: 1px solid var(--border); }
+  h2:first-of-type { border-top:none; padding-top:0; margin-top: 28px; }
+  h3 { color:var(--navy); font-size: 17px; margin: 26px 0 8px; }
+  p { color:var(--ink-soft); margin: 0 0 12px; max-width: 720px; }
+  ul { color:var(--ink-soft); padding-left: 22px; }
+  ul li { margin-bottom: 4px; }
+  code { background:var(--accent-light); color:var(--accent-dark);
+         padding: 1px 6px; border-radius: 4px; font-size: 13px;
+         font-family: "SF Mono", Menlo, Consolas, monospace; }
+
+  .phase-bar { display:flex; align-items:center; gap:10px; margin: 20px 0 16px;
+               background:#fff; border:1px solid var(--border); border-radius:10px;
+               padding: 10px 14px; }
+  .phase-bar .badge { padding: 4px 10px; border-radius:99px; color:#fff;
+                      font-size: 12px; font-weight:700; text-transform:uppercase;
+                      letter-spacing: 0.5px; }
+  .phase-bar.p1 .badge { background:var(--accent); }
+  .phase-bar.p2 .badge { background:var(--accent-dark); }
+  .phase-bar.p3 .badge { background:var(--navy); }
+  .phase-bar .desc { color:var(--ink-soft); font-size:13px; }
+
+  .step { background:#fff; border:1px solid var(--border); border-radius:12px;
+          padding:18px 20px; margin-bottom:16px;
+          box-shadow: 0 1px 3px rgba(9,42,64,0.04); }
+  .step-head { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+  .step-num { width:34px; height:34px; border-radius:99px; color:#fff;
+              display:inline-flex; align-items:center; justify-content:center;
+              font-weight:700; font-size:14px; flex-shrink:0; }
+  .step.p1 .step-num { background:var(--accent); }
+  .step.p2 .step-num { background:var(--accent-dark); }
+  .step.p3 .step-num { background:var(--navy); }
+  .step-title { font-size:17px; font-weight:600; color:var(--navy); }
+  .step .where { margin-left:auto; font-size:11px; color:var(--muted);
+                 background:var(--surface); padding: 4px 10px; border-radius:6px;
+                 white-space:nowrap; }
+  .step-body { color:var(--ink-soft); font-size:14px; }
+  .step-body b { color:var(--navy); }
+
+  .diagram { background:#f8fbfd; border:1px dashed var(--border);
+             border-radius:10px; padding:16px; margin: 12px 0;
+             overflow-x:auto; }
+  .diagram svg { display:block; margin: 0 auto; max-width: 100%; height:auto; }
+  .diagram-caption { font-size:11px; color:var(--muted);
+                     text-align:center; margin-top:6px; font-style:italic; }
+
+  .twocol { display:grid; grid-template-columns: 1fr; gap:14px; margin: 12px 0; }
+  @media (min-width: 720px) { .twocol { grid-template-columns: 1fr 1fr; } }
+  .twocol .note { background:var(--accent-light); border-left:3px solid var(--accent);
+                  padding:10px 14px; border-radius:6px; font-size:13px; color:var(--ink); }
+  .twocol .note b { color:var(--accent-dark); }
+  .twocol .warn { background:var(--warn-bg); border-left:3px solid var(--warn);
+                  padding:10px 14px; border-radius:6px; font-size:13px; color:var(--ink); }
+  .twocol .warn b { color:var(--warn); }
+
+  table.tbl { width:100%; border-collapse:collapse; margin:12px 0; font-size:13px; }
+  table.tbl th { background:var(--accent-light); color:var(--accent-dark);
+                 text-align:left; padding:8px 10px; font-size:11px;
+                 text-transform:uppercase; letter-spacing: 0.4px; }
+  table.tbl td { padding:8px 10px; border-bottom:1px solid var(--border);
+                 color:var(--ink-soft); vertical-align: top; }
+  table.tbl td b { color:var(--navy); }
+</style>
+</head>
+<body>
+
+<header class="brand">
+  <img src="/static/ps-logo-white.svg" alt="Pacific Seeds" class="logo" />
+  <div class="titles">
+    <span class="sub">R&amp;D Sorghum</span>
+    <span class="main">Nursery Fieldbook</span>
+  </div>
+  <span class="grow"></span>
+  <a href="/app" class="open-app">▶ Open the app</a>
+</header>
+
+<div class="layout">
+
+<aside class="toc">
+  <h3>OVERVIEW</h3>
+  <a href="#what" class="section">What this app does</a>
+  <a href="#flow" class="section">End-to-end data flow</a>
+
+  <h3>PHASE 1 · PREP</h3>
+  <a href="#step-1">1. Initialise from PRISM</a>
+  <a href="#step-2">2. Build Nursery list</a>
+  <a href="#step-3">3. Design Field Map</a>
+  <a href="#step-4">4. Generate Packet PDF</a>
+  <a href="#step-5">5. Sort for racking</a>
+
+  <h3>PHASE 2 · FIELD</h3>
+  <a href="#step-6">6. Record replacement</a>
+  <a href="#step-7">7. Record planting error</a>
+  <a href="#step-8">8. Record spray</a>
+  <a href="#step-9">9. Record AB bag pulling</a>
+
+  <h3>PHASE 3 · SYNC</h3>
+  <a href="#step-10">10. Pull updated PRISM</a>
+  <a href="#step-11">11. Generate Fieldbook</a>
+  <a href="#step-12">12. Dashboard</a>
+  <a href="#step-13">13. Push to Hub</a>
+
+  <h3>UNDER THE HOOD</h3>
+  <a href="#arch" class="section">Architecture</a>
+</aside>
+
+<main>
+  <!-- ─── Hero ─── -->
+  <section class="hero" id="what">
+    <div class="hero-grid">
+      <div>
+        <span class="hero-pill">R&amp;D Sorghum · Pacific Seeds</span>
+        <h1 class="hero-h1">Nursery Fieldbook — from PRISM to the paddock, digital.</h1>
+        <p class="hero-sub">
+          Replace paper-and-Excel pipelines with QR-scanning, offline-first
+          event capture on a phone, and a live Hub dashboard. PRISM exports
+          come in at the top; a multi-tab Fieldbook comes out the bottom —
+          ready for the breeder to push back into PRISM.
+        </p>
+        <div class="hero-cta">
+          <a href="/app" class="primary">▶ Open the app</a>
+          <a href="/dashboard" class="link">Hub dashboard →</a>
+          <a href="#flow" class="link">See how it works ↓</a>
+        </div>
+      </div>
+      <div class="hero-art" aria-hidden="true">
+        <svg viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="hg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#3AB3E5"/>
+              <stop offset="100%" stop-color="#0678CD"/>
+            </linearGradient>
+          </defs>
+          <rect x="20" y="20" width="280" height="180" rx="14" fill="#fff" stroke="#d8e3ed"/>
+          <rect x="20" y="20" width="280" height="32" fill="#092A40" rx="14"/>
+          <rect x="20" y="44" width="280" height="3" fill="#3AB3E5"/>
+          <circle cx="36" cy="36" r="5" fill="#3AB3E5"/>
+          <text x="48" y="40" font-family="Helvetica" font-weight="700" fill="#fff" font-size="10">PACIFIC SEEDS</text>
+          <text x="282" y="40" text-anchor="end" font-family="Helvetica" fill="#8FCEEE" font-size="9">AUGT1-26S-IMI</text>
+          <g transform="translate(38,62)">
+            <rect width="48" height="48" fill="#0678CD" rx="2"/>
+            <rect x="4" y="4" width="40" height="40" fill="#fff"/>
+            <g fill="#092A40">
+              <rect x="8"  y="8"  width="6" height="6"/><rect x="20" y="8"  width="6" height="6"/><rect x="32" y="8"  width="6" height="6"/>
+              <rect x="8"  y="20" width="6" height="6"/><rect x="26" y="20" width="6" height="6"/>
+              <rect x="14" y="26" width="6" height="6"/><rect x="32" y="26" width="6" height="6"/>
+              <rect x="8"  y="32" width="6" height="6"/><rect x="20" y="32" width="6" height="6"/><rect x="32" y="32" width="6" height="6"/>
+            </g>
+          </g>
+          <text x="100" y="76"  font-family="Helvetica" font-weight="700" fill="#092A40" font-size="13">Plot 2_8</text>
+          <text x="100" y="89"  font-family="Helvetica" font-weight="600" fill="#0678CD" font-size="10">Spike 1 · Rack 19</text>
+          <text x="100" y="102" font-family="Helvetica" fill="#34526e" font-size="9">IMIAAT190015:4</text>
+          <text x="100" y="113" font-family="Helvetica" fill="#34526e" font-size="9">BC3 · CMS A</text>
+          <g font-family="Helvetica" font-size="9" font-weight="600">
+            <rect x="38"  y="130" width="58" height="22" rx="6" fill="url(#hg)"/>
+            <text x="67"  y="145" text-anchor="middle" fill="#fff">🔄 Replace</text>
+            <rect x="102" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="131" y="145" text-anchor="middle" fill="#0678CD">⚠️ Error</text>
+            <rect x="166" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="195" y="145" text-anchor="middle" fill="#0678CD">💧 Spray</text>
+            <rect x="230" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="259" y="145" text-anchor="middle" fill="#0678CD">📦 AB pull</text>
+          </g>
+          <rect x="38" y="164" width="250" height="24" rx="6" fill="#092A40"/>
+          <text x="163" y="180" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="11">Save replacement</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- Three-phase summary -->
+  <div class="phase-strip">
+    <div class="phase-tile p1">
+      <span class="phase-tile-num">Phase 1</span>
+      <div class="phase-tile-title">Prep at the desk</div>
+      <div class="phase-tile-body">Upload the PRISM export, auto-detect spikes from the Map tab, build the Nursery list, and print QR-coded packet labels.</div>
+    </div>
+    <div class="phase-tile p2">
+      <span class="phase-tile-num">Phase 2</span>
+      <div class="phase-tile-title">Field operations</div>
+      <div class="phase-tile-body">Scan a packet QR (or find by plot). Tap an event tile — replacement, planting error, spray, AB bag pull. Saves offline.</div>
+    </div>
+    <div class="phase-tile p3">
+      <span class="phase-tile-num">Phase 3</span>
+      <div class="phase-tile-title">Sync & hand back</div>
+      <div class="phase-tile-body">Pull the updated PRISM file, generate the multi-tab Fieldbook for upload, and watch the Hub dashboard aggregate every nursery live.</div>
+    </div>
+  </div>
+
+  <h2 id="flow">End-to-end data flow</h2>
+  <div class="diagram">
+    <svg viewBox="0 0 880 280" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#0678CD"/>
+        </marker>
+      </defs>
+      <!-- Row 1: PRISM -> Init -> SQLite -->
+      <rect x="20"  y="20"  width="160" height="60" rx="10" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+      <text x="100" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="14">PRISM export</text>
+      <text x="100" y="65" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="11">Nursery site .xlsx</text>
+
+      <rect x="240" y="20" width="160" height="60" rx="10" fill="#0678CD"/>
+      <text x="320" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="14">Initialise</text>
+      <text x="320" y="65" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="11">openpyxl + Map parser</text>
+
+      <rect x="460" y="20" width="160" height="60" rx="10" fill="#092A40"/>
+      <text x="540" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="14">SQLite</text>
+      <text x="540" y="65" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="11">packets + events</text>
+
+      <rect x="680" y="20" width="180" height="60" rx="10" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+      <text x="770" y="44" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="14">Outputs</text>
+      <text x="770" y="62" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="11">QR PDF · Workbook</text>
+
+      <line x1="180" y1="50" x2="240" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="400" y1="50" x2="460" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="620" y1="50" x2="680" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+
+      <!-- Row 2: PWA scans events -->
+      <rect x="20"  y="120" width="160" height="60" rx="10" fill="#3AB3E5"/>
+      <text x="100" y="148" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="14">📱 PWA in field</text>
+      <text x="100" y="165" text-anchor="middle" font-family="Helvetica" fill="#fff" font-size="11">QR scan + events</text>
+
+      <rect x="240" y="120" width="160" height="60" rx="10" fill="#0678CD"/>
+      <text x="320" y="148" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="14">Sync (offline-first)</text>
+      <text x="320" y="165" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="11">IndexedDB outbox</text>
+
+      <!-- arrows pwa -> sync -> sqlite -->
+      <line x1="180" y1="150" x2="240" y2="150" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="400" y1="150" x2="510" y2="100" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+
+      <!-- Row 3: fieldbook -->
+      <rect x="460" y="200" width="160" height="60" rx="10" fill="#0678CD"/>
+      <text x="540" y="228" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="14">Fieldbook export</text>
+      <text x="540" y="245" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="11">multi-tab .xlsx</text>
+
+      <rect x="680" y="200" width="180" height="60" rx="10" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+      <text x="770" y="228" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="14">PRISM upload</text>
+      <text x="770" y="245" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="11">Replacements done · etc</text>
+
+      <line x1="540" y1="80"  x2="540" y2="200" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="620" y1="230" x2="680" y2="230" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+
+      <!-- Hub branch -->
+      <rect x="20"  y="200" width="160" height="60" rx="10" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+      <text x="100" y="228" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="14">/dashboard</text>
+      <text x="100" y="245" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="11">live Hub view</text>
+      <line x1="460" y1="100" x2="180" y2="200" stroke="#0678CD" stroke-width="2" stroke-dasharray="4 3" marker-end="url(#arr)"/>
+    </svg>
+    <div class="diagram-caption">Top row = setup. Middle row = field ops. Bottom row = post-field exports + live Hub view.</div>
+  </div>
+
+  <!-- ─── PHASE 1 ─── -->
+  <div class="phase-bar p1">
+    <span class="badge">Phase 1</span>
+    <div class="desc">Pre-field prep — done at the desk by a breeder or admin once per nursery.</div>
+  </div>
+
+  <div class="step p1" id="step-1">
+    <div class="step-head">
+      <span class="step-num">1</span>
+      <span class="step-title">Initialise from PRISM export</span>
+      <span class="where">Admin panel · Step 1</span>
+    </div>
+    <div class="step-body">
+      <p>Upload the PRISM "Nursery site" Excel export. The app reads every row, peeks
+      at any embedded <code>Map</code> sheet to figure out spike groupings, and
+      stamps every packet with a unique 8-char UUID + QR payload of the form
+      <code>SNUR:&lt;nursery&gt;:&lt;uuid&gt;</code>.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 700 110" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10"  y="20" width="120" height="60" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+          <text x="70" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="13">PRISM .xlsx</text>
+          <text x="70" y="64" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">Sheet1 + Map</text>
+
+          <rect x="170" y="20" width="120" height="60" rx="8" fill="#0678CD"/>
+          <text x="230" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">read_prism</text>
+          <text x="230" y="64" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">openpyxl</text>
+
+          <rect x="330" y="20" width="120" height="60" rx="8" fill="#0678CD"/>
+          <text x="390" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">parse_map</text>
+          <text x="390" y="64" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">spike layout</text>
+
+          <rect x="490" y="20" width="120" height="60" rx="8" fill="#092A40"/>
+          <text x="550" y="48" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">SQLite</text>
+          <text x="550" y="64" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">packets table</text>
+
+          <line x1="130" y1="50" x2="170" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="290" y1="50" x2="330" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="450" y1="50" x2="490" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="550" y1="80" x2="550" y2="100" stroke="#0678CD" stroke-width="1.5" stroke-dasharray="3 3"/>
+          <line x1="550" y1="100" x2="640" y2="100" stroke="#0678CD" stroke-width="1.5" stroke-dasharray="3 3"/>
+          <text x="675" y="103" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10" font-weight="600">QR PDF · Workbook</text>
+        </svg>
+      </div>
+      <p><b>Inputs:</b> Nursery code, PRISM export <code>.xlsx</code>, sheet name (auto-detected).
+         <b>Outputs:</b> 1,300+ packets seeded in SQLite, a 1.8 MB QR-coded PDF of packet labels,
+         and a 14-tab workbook (<code>&lt;nursery&gt;_workbook.xlsx</code>) for reference.</p>
+    </div>
+  </div>
+
+  <div class="step p1" id="step-2">
+    <div class="step-head">
+      <span class="step-num">2</span>
+      <span class="step-title">Build Nursery list</span>
+      <span class="where">Admin panel · Step 2</span>
+    </div>
+    <div class="step-body">
+      <p>Groups every packet by Source ID, counts repeats, and multiplies by
+      1.4 to get the required seed quantity per packet. Source IDs with more
+      than 10 reps are flagged <code>BULK</code> for the bulk-treatment line.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 660 90" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10"  y="15" width="140" height="60" rx="8" fill="#092A40"/>
+          <text x="80" y="42" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">packets table</text>
+          <text x="80" y="58" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">1300 rows · source_id</text>
+
+          <rect x="190" y="15" width="180" height="60" rx="8" fill="#0678CD"/>
+          <text x="280" y="42" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">GROUP BY source_id</text>
+          <text x="280" y="58" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">qty = 1.4 × reps</text>
+
+          <rect x="410" y="15" width="240" height="60" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+          <text x="530" y="36" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="13">Nursery list</text>
+          <text x="530" y="52" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">951 unique source IDs</text>
+          <text x="530" y="66" text-anchor="middle" font-family="Helvetica" fill="#a8631c" font-size="10" font-weight="600">↳ 12 BULK · 939 normal</text>
+
+          <line x1="150" y1="45" x2="190" y2="45" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="370" y1="45" x2="410" y2="45" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="step p1" id="step-3">
+    <div class="step-head">
+      <span class="step-num">3</span>
+      <span class="step-title">Design Field Map</span>
+      <span class="where">Admin panel · Field Map editor</span>
+    </div>
+    <div class="step-body">
+      <p>The Field Map editor lets you redefine spike-to-row mappings (e.g.
+      <code>Spike 1 = rows 1–10</code>, <code>Spike 2 = rows 11–26</code>) and
+      saves them to the <code>field_maps</code> table. Saving triggers a
+      recompute that updates <code>spike</code> + <code>rack_order</code> for every
+      packet in this nursery.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 660 130" xmlns="http://www.w3.org/2000/svg">
+          <!-- Visual grid -->
+          <text x="20" y="20" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="11">Field rows →</text>
+          <g font-family="Helvetica" font-size="10" fill="#5a7896">
+            <text x="60" y="40">1</text><text x="80" y="40">2</text>
+            <text x="100" y="40">3</text><text x="120" y="40">4</text>
+            <text x="140" y="40">5</text><text x="160" y="40">6</text>
+            <text x="180" y="40">7</text><text x="200" y="40">8</text>
+            <text x="220" y="40">9</text><text x="240" y="40">10</text>
+            <text x="260" y="40">11</text><text x="280" y="40">12</text>
+            <text x="300" y="40">13</text><text x="320" y="40">14</text>
+            <text x="340" y="40">15</text><text x="360" y="40">16</text>
+            <text x="380" y="40">17</text><text x="400" y="40">18</text>
+            <text x="420" y="40">19</text><text x="440" y="40">20</text>
+            <text x="460" y="40">21</text><text x="480" y="40">22</text>
+            <text x="500" y="40">23</text><text x="520" y="40">24</text>
+            <text x="540" y="40">25</text><text x="560" y="40">26</text>
+          </g>
+          <!-- Spike bars -->
+          <rect x="50" y="55" width="210" height="20" rx="4" fill="#0678CD"/>
+          <text x="155" y="69" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">SPIKE 1 (rows 1–10)</text>
+          <rect x="270" y="55" width="320" height="20" rx="4" fill="#0075BD"/>
+          <text x="430" y="69" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">SPIKE 2 (rows 11–26)</text>
+          <!-- Below: packets per spike -->
+          <text x="155" y="100" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">500 packets</text>
+          <text x="430" y="100" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">800 packets</text>
+          <text x="320" y="118" text-anchor="middle" font-family="Helvetica" fill="#5a7896" font-size="10" font-style="italic">Rack order = serpentine walk within each spike</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="step p1" id="step-4">
+    <div class="step-head">
+      <span class="step-num">4</span>
+      <span class="step-title">Generate Packet PDF</span>
+      <span class="where">Admin panel · Download</span>
+    </div>
+    <div class="step-body">
+      <p>A branded PDF (4 columns × 8 rows per A4 page) with one QR-coded label
+      per packet. Header band shows nursery code + page number. Each label has
+      plot, spike, rack-order, material ID, source ID, generation, CMS, and the
+      QR payload printed as text underneath (fallback if scanner misreads).</p>
+      <div class="diagram">
+        <svg viewBox="0 0 660 220" xmlns="http://www.w3.org/2000/svg">
+          <rect x="40" y="10" width="580" height="200" rx="6" fill="#fff" stroke="#d8e3ed" stroke-width="1.5"/>
+          <rect x="40" y="10" width="580" height="32" fill="#092A40" rx="6"/>
+          <rect x="40" y="32" width="580" height="3" fill="#3AB3E5"/>
+          <text x="60" y="30" font-family="Helvetica" font-weight="700" fill="#fff" font-size="11">PACIFIC SEEDS</text>
+          <text x="170" y="30" font-family="Helvetica" fill="#8FCEEE" font-size="11">Nursery AUGT1-26S-IMI · Page 1/41</text>
+
+          <!-- 4 example labels -->
+          <g font-family="Helvetica">
+            <g transform="translate(60,55)">
+              <rect width="120" height="65" stroke="#d8e3ed" fill="#fff" />
+              <rect x="6" y="6" width="38" height="38" fill="#092A40"/>
+              <rect x="9" y="9" width="32" height="32" fill="#fff"/>
+              <rect x="14" y="14" width="6" height="6" fill="#092A40"/><rect x="22" y="14" width="6" height="6" fill="#092A40"/><rect x="30" y="14" width="6" height="6" fill="#092A40"/>
+              <rect x="14" y="22" width="6" height="6" fill="#092A40"/><rect x="30" y="22" width="6" height="6" fill="#092A40"/>
+              <rect x="14" y="30" width="6" height="6" fill="#092A40"/><rect x="22" y="30" width="6" height="6" fill="#092A40"/><rect x="30" y="30" width="6" height="6" fill="#092A40"/>
+              <text x="50" y="14" font-weight="700" fill="#092A40" font-size="9">Plot 1_1</text>
+              <text x="50" y="24" font-weight="700" fill="#0678CD" font-size="8">Spike 1 · Rack 1</text>
+              <text x="50" y="34" fill="#34526e" font-size="7">Mat: 71263/91665</text>
+              <text x="50" y="42" fill="#34526e" font-size="7">Src: AUGT1-21W-…</text>
+              <text x="50" y="50" fill="#34526e" font-size="7">F1 · CMS A/R</text>
+              <text x="3" y="62" fill="#e45138" font-style="italic" font-size="6">SNUR:AUGT1-26S-IMI:abc123</text>
+            </g>
+            <g transform="translate(190,55)">
+              <rect width="120" height="65" stroke="#d8e3ed" fill="#fff" />
+              <rect x="6" y="6" width="38" height="38" fill="#092A40"/>
+              <rect x="9" y="9" width="32" height="32" fill="#fff"/>
+              <rect x="14" y="14" width="6" height="6" fill="#092A40"/><rect x="30" y="14" width="6" height="6" fill="#092A40"/>
+              <rect x="14" y="22" width="6" height="6" fill="#092A40"/><rect x="22" y="22" width="6" height="6" fill="#092A40"/>
+              <rect x="30" y="30" width="6" height="6" fill="#092A40"/>
+              <text x="50" y="14" font-weight="700" fill="#092A40" font-size="9">Plot 1_2</text>
+              <text x="50" y="24" font-weight="700" fill="#0678CD" font-size="8">Spike 1 · Rack 2</text>
+              <text x="50" y="34" fill="#34526e" font-size="7">Mat: 71263/91665</text>
+              <text x="50" y="42" fill="#34526e" font-size="7">Src: AUGT1-21W-…</text>
+              <text x="50" y="50" fill="#34526e" font-size="7">F1 · CMS A/R</text>
+            </g>
+            <g transform="translate(320,55)">
+              <rect width="120" height="65" stroke="#d8e3ed" fill="#fff" />
+              <rect x="6" y="6" width="38" height="38" fill="#092A40"/>
+              <rect x="9" y="9" width="32" height="32" fill="#fff"/>
+              <rect x="22" y="14" width="6" height="6" fill="#092A40"/><rect x="14" y="22" width="6" height="6" fill="#092A40"/>
+              <rect x="22" y="22" width="6" height="6" fill="#092A40"/><rect x="30" y="22" width="6" height="6" fill="#092A40"/>
+              <text x="50" y="14" font-weight="700" fill="#092A40" font-size="9">Plot 1_3</text>
+              <text x="50" y="24" font-weight="700" fill="#0678CD" font-size="8">Spike 1 · Rack 3</text>
+            </g>
+            <g transform="translate(450,55)">
+              <rect width="120" height="65" stroke="#d8e3ed" fill="#fff" />
+              <rect x="6" y="6" width="38" height="38" fill="#092A40"/>
+              <rect x="9" y="9" width="32" height="32" fill="#fff"/>
+              <rect x="14" y="14" width="6" height="6" fill="#092A40"/><rect x="22" y="14" width="6" height="6" fill="#092A40"/>
+              <rect x="14" y="30" width="6" height="6" fill="#092A40"/><rect x="30" y="30" width="6" height="6" fill="#092A40"/>
+              <text x="50" y="14" font-weight="700" fill="#092A40" font-size="9">Plot 1_4</text>
+              <text x="50" y="24" font-weight="700" fill="#0678CD" font-size="8">Spike 1 · Rack 4</text>
+            </g>
+          </g>
+          <text x="330" y="200" text-anchor="middle" font-family="Helvetica" fill="#5a7896" font-size="11" font-style="italic">…32 labels per page · ~41 pages for a 1300-packet nursery</text>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="step p1" id="step-5">
+    <div class="step-head">
+      <span class="step-num">5</span>
+      <span class="step-title">Sort packets for racking (LSD Radix)</span>
+      <span class="where">Auto · in workbook + manifest</span>
+    </div>
+    <div class="step-body">
+      <p>Packets are physically picked in <b>Rack Order</b> (ascending) within each
+      Spike (ascending) — the standard Least-Significant-Digit radix sort used in
+      the original VBA. This is the order they should be stacked in racks for
+      planting.</p>
+      <table class="tbl">
+        <thead><tr><th>Rack #</th><th>Plot</th><th>Spike</th><th>Walk path</th></tr></thead>
+        <tbody>
+          <tr><td><b>1</b></td><td>1_1</td><td>1</td><td>Range 1 ↓ rows 1–10</td></tr>
+          <tr><td><b>10</b></td><td>1_10</td><td>1</td><td>end of range 1 in Spike 1</td></tr>
+          <tr><td><b>11</b></td><td>2_10</td><td>1</td><td>Range 2 ↑ rows 10–1 (serpentine)</td></tr>
+          <tr><td><b>20</b></td><td>2_1</td><td>1</td><td>end of range 2 in Spike 1</td></tr>
+          <tr><td>…</td><td>…</td><td>…</td><td>continues across all ranges, then Spike 2</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- ─── PHASE 2 ─── -->
+  <div class="phase-bar p2">
+    <span class="badge">Phase 2</span>
+    <div class="desc">Field operations — done on a phone in the paddock by techs.</div>
+  </div>
+
+  <div class="step p2" id="step-6">
+    <div class="step-head">
+      <span class="step-num">6</span>
+      <span class="step-title">Record replacement</span>
+      <span class="where">PWA · 🔄 Replacement tile</span>
+    </div>
+    <div class="step-body">
+      <p>Tech scans the packet QR (or finds the packet by plot if the QR is
+      damaged), taps the <b>Replacement</b> tile, enters the stage
+      (Packeting/Planting), the original Source ID, and the replaced-with Source
+      ID. Saved to IndexedDB outbox immediately; syncs to the backend as
+      soon as the device has connectivity.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 740 110" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10"  y="20" width="100" height="60" rx="8" fill="#3AB3E5"/>
+          <text x="60" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">📷 Scan QR</text>
+          <text x="60" y="62" text-anchor="middle" font-family="Helvetica" fill="#fff" font-size="10">or Find by plot</text>
+
+          <rect x="130" y="20" width="120" height="60" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1.5"/>
+          <text x="190" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="12">Packet card</text>
+          <text x="190" y="62" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">Plot, spike, rack…</text>
+
+          <rect x="270" y="20" width="120" height="60" rx="8" fill="#0678CD"/>
+          <text x="330" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">🔄 Replacement</text>
+          <text x="330" y="62" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">stage, sources</text>
+
+          <rect x="410" y="20" width="130" height="60" rx="8" fill="#0678CD"/>
+          <text x="475" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">IndexedDB</text>
+          <text x="475" y="62" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">outbox (offline)</text>
+
+          <rect x="560" y="20" width="170" height="60" rx="8" fill="#092A40"/>
+          <text x="645" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="12">POST /sync</text>
+          <text x="645" y="62" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">events table (SQLite)</text>
+
+          <line x1="110" y1="50" x2="130" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="250" y1="50" x2="270" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="390" y1="50" x2="410" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="540" y1="50" x2="560" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+        </svg>
+      </div>
+      <div class="twocol">
+        <div class="note">
+          <b>Offline-first.</b> All event tiles save instantly to IndexedDB on the
+          phone. The sync to the backend is a background concern — if the tech
+          steps out of Wi-Fi range, events queue up and flush when they walk back.
+        </div>
+        <div class="note">
+          <b>Idempotent.</b> Each event has a client-generated UUID. The
+          <code>/sync</code> endpoint refuses duplicates, so retries are safe.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="step p2" id="step-7">
+    <div class="step-head">
+      <span class="step-num">7</span>
+      <span class="step-title">Record planting error</span>
+      <span class="where">PWA · ⚠️ Planting error tile</span>
+    </div>
+    <div class="step-body">
+      <p>Pick from a preset list of error kinds (Missed plot, Wrong packet planted,
+      Damaged packet, Mixed packets, Other), set severity, and add a free-text note.
+      Same event-capture pipeline as Replacement — single source of truth.</p>
+    </div>
+  </div>
+
+  <div class="step p2" id="step-8">
+    <div class="step-head">
+      <span class="step-num">8</span>
+      <span class="step-title">Record spray applied</span>
+      <span class="where">PWA · 💧 Spray applied tile</span>
+    </div>
+    <div class="step-body">
+      <p>Pick product (TFMSA / IMI / HPPD / Other), date (defaults to today),
+      and optional rate. One event per packet per spray pass.</p>
+    </div>
+  </div>
+
+  <div class="step p2" id="step-9">
+    <div class="step-head">
+      <span class="step-num">9</span>
+      <span class="step-title">Record AB bag pulling</span>
+      <span class="where">PWA · 📦 AB bag pulled tile</span>
+    </div>
+    <div class="step-body">
+      <p>Enter bag count + date pulled. Used during weekly AB-line management.</p>
+    </div>
+  </div>
+
+  <!-- ─── PHASE 3 ─── -->
+  <div class="phase-bar p3">
+    <span class="badge">Phase 3</span>
+    <div class="desc">Post-field & sync — produces the Fieldbook + live Hub view.</div>
+  </div>
+
+  <div class="step p3" id="step-10">
+    <div class="step-head">
+      <span class="step-num">10</span>
+      <span class="step-title">Pull updated PRISM</span>
+      <span class="where">Admin panel · Step 1 (re-run)</span>
+    </div>
+    <div class="step-body">
+      <p>Once the breeder updates PRISM with replacements and errors, download
+      the refreshed Nursery site .xlsx and re-run Step 1 with it. Existing
+      packets get refreshed; field events (already in SQLite) are preserved.</p>
+    </div>
+  </div>
+
+  <div class="step p3" id="step-11">
+    <div class="step-head">
+      <span class="step-num">11</span>
+      <span class="step-title">Generate Fieldbook</span>
+      <span class="where">Admin panel · Download Fieldbook .xlsx</span>
+    </div>
+    <div class="step-body">
+      <p>Pulls every event for the nursery from SQLite, groups by event type,
+      and writes a multi-tab Excel workbook (Replacements, Planting errors,
+      Spray log, AB bag pulling, Date recording, Notes). Each sheet has Plot,
+      Material, Source, Tech, Captured-at, plus type-specific columns. Hand to
+      the breeder for PRISM upload.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 700 130" xmlns="http://www.w3.org/2000/svg">
+          <rect x="10"  y="20" width="120" height="60" rx="8" fill="#092A40"/>
+          <text x="70" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">events</text>
+          <text x="70" y="62" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">SQLite</text>
+
+          <rect x="170" y="20" width="140" height="60" rx="8" fill="#0678CD"/>
+          <text x="240" y="46" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">group by type</text>
+          <text x="240" y="62" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="10">join packets table</text>
+
+          <g transform="translate(370,15)">
+            <rect width="280" height="100" rx="8" fill="#fff" stroke="#0678CD" stroke-width="1.5"/>
+            <text x="140" y="22" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="13">Fieldbook .xlsx</text>
+            <line x1="20" y1="32" x2="260" y2="32" stroke="#d8e3ed"/>
+            <text x="20" y="48" font-family="Helvetica" fill="#34526e" font-size="10">▸ Summary</text>
+            <text x="20" y="62" font-family="Helvetica" fill="#34526e" font-size="10">▸ Replacements done</text>
+            <text x="20" y="76" font-family="Helvetica" fill="#34526e" font-size="10">▸ Planting errors</text>
+            <text x="20" y="90" font-family="Helvetica" fill="#34526e" font-size="10">▸ Spray log</text>
+            <text x="140" y="48" font-family="Helvetica" fill="#34526e" font-size="10">▸ AB bag pulling</text>
+            <text x="140" y="62" font-family="Helvetica" fill="#34526e" font-size="10">▸ Date recording</text>
+            <text x="140" y="76" font-family="Helvetica" fill="#34526e" font-size="10">▸ Notes</text>
+          </g>
+
+          <line x1="130" y1="50" x2="170" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+          <line x1="310" y1="50" x2="370" y2="50" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div class="step p3" id="step-12">
+    <div class="step-head">
+      <span class="step-num">12</span>
+      <span class="step-title">Refresh dashboard</span>
+      <span class="where">/dashboard route · live</span>
+    </div>
+    <div class="step-body">
+      <p>The <code>/dashboard</code> page is server-rendered on every page load —
+      shows every registered nursery, packet counts, event counts by type and
+      tech, and a hyperlinked file path to open each underlying workbook.
+      No manual refresh step; just navigate there.</p>
+    </div>
+  </div>
+
+  <div class="step p3" id="step-13">
+    <div class="step-head">
+      <span class="step-num">13</span>
+      <span class="step-title">Push to Hub</span>
+      <span class="where">Continuous · via /sync</span>
+    </div>
+    <div class="step-body">
+      <p>Unlike the Excel workflow, there's no separate batch push. Every
+      <code>/sync</code> call from the PWA IS the push — the Hub view always
+      reflects the live state. The cycle ends here; you're ready to start the
+      next season or onboard another nursery.</p>
+    </div>
+  </div>
+
+  <!-- Architecture -->
+  <h2 id="arch">Architecture</h2>
+  <div class="diagram">
+    <svg viewBox="0 0 900 280" xmlns="http://www.w3.org/2000/svg">
+      <!-- Client -->
+      <rect x="20" y="30" width="280" height="220" rx="12" fill="#fff" stroke="#0678CD" stroke-width="1.5" stroke-dasharray="5 5"/>
+      <text x="160" y="22" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#0678CD" font-size="12">CLIENT (phone / desktop)</text>
+
+      <rect x="40" y="50" width="240" height="50" rx="8" fill="#3AB3E5"/>
+      <text x="160" y="74" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">PWA (HTML + JS)</text>
+      <text x="160" y="90" text-anchor="middle" font-family="Helvetica" fill="#fff" font-size="11">Service worker · IndexedDB</text>
+
+      <rect x="40" y="115" width="240" height="40" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="160" y="139" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">BarcodeDetector (or jsQR fallback)</text>
+
+      <rect x="40" y="170" width="240" height="40" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="160" y="194" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">Offline outbox · sync queue</text>
+
+      <rect x="40" y="220" width="240" height="20" rx="6" fill="#fff" stroke="#d8e3ed"/>
+      <text x="160" y="234" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">Pacific Seeds branding (white + blue)</text>
+
+      <!-- Server -->
+      <rect x="340" y="30" width="280" height="220" rx="12" fill="#fff" stroke="#0075BD" stroke-width="1.5" stroke-dasharray="5 5"/>
+      <text x="480" y="22" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#0075BD" font-size="12">SERVER (FastAPI)</text>
+
+      <rect x="360" y="50" width="240" height="50" rx="8" fill="#0678CD"/>
+      <text x="480" y="74" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">FastAPI</text>
+      <text x="480" y="90" text-anchor="middle" font-family="Helvetica" fill="#bfdcf5" font-size="11">/sync · /admin · /nursery/*</text>
+
+      <rect x="360" y="115" width="240" height="40" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="480" y="139" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">nursery_init · fieldbook_export</text>
+
+      <rect x="360" y="170" width="240" height="40" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="480" y="194" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">map_parser · QR + reportlab PDF</text>
+
+      <rect x="360" y="220" width="240" height="20" rx="6" fill="#fff" stroke="#d8e3ed"/>
+      <text x="480" y="234" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">Python 3.11 · openpyxl · uvicorn</text>
+
+      <!-- Storage -->
+      <rect x="660" y="30" width="220" height="220" rx="12" fill="#fff" stroke="#092A40" stroke-width="1.5" stroke-dasharray="5 5"/>
+      <text x="770" y="22" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="12">STORAGE</text>
+
+      <rect x="680" y="50" width="180" height="60" rx="8" fill="#092A40"/>
+      <text x="770" y="74" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="13">SQLite</text>
+      <text x="770" y="89" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">packets · events</text>
+      <text x="770" y="102" text-anchor="middle" font-family="Helvetica" fill="#8FCEEE" font-size="10">nurseries · field_maps</text>
+
+      <rect x="680" y="125" width="180" height="50" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="770" y="148" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">output/*.pdf</text>
+      <text x="770" y="164" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">QR packet labels</text>
+
+      <rect x="680" y="190" width="180" height="50" rx="8" fill="#e9f3fc" stroke="#0678CD" stroke-width="1"/>
+      <text x="770" y="213" text-anchor="middle" font-family="Helvetica" font-weight="600" fill="#092A40" font-size="12">output/*.xlsx</text>
+      <text x="770" y="229" text-anchor="middle" font-family="Helvetica" fill="#34526e" font-size="10">Workbook · Fieldbook</text>
+
+      <!-- arrows -->
+      <line x1="300" y1="140" x2="340" y2="140" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="620" y1="140" x2="660" y2="140" stroke="#0678CD" stroke-width="2" marker-end="url(#arr)"/>
+    </svg>
+  </div>
+
+  <p style="margin-top: 22px; padding: 14px; background:var(--accent-light); border-left:3px solid var(--accent); border-radius:6px; color:var(--ink); font-size:13px;">
+    <b>Source.</b> All code lives in <code>poc/</code>:
+    backend at <code>backend/app.py</code>, PWA at <code>pwa/</code>,
+    workflow scripts at <code>scripts/</code>, and the parallel Excel/VBA distribution
+    at <code>excel_workflow/dist/</code>.
+  </p>
+</main>
+</div>
+</body>
+</html>

@@ -1,0 +1,629 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#092A40" />
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <title>Pacific Seeds · Nursery</title>
+  <style>
+    /* Pacific Seeds brand palette — white + blue (matches pacificseeds.com.au) */
+    :root {
+      --bg:#ffffff; --surface:#f3f7fb; --card:#ffffff; --border:#d8e3ed;
+      --ink:#092A40; --ink-soft:#34526e; --muted:#5a7896;
+      --accent:#0678CD; --accent-dark:#0075BD; --accent-light:#e9f3fc;
+      --sky:#3AB3E5; --skylight:#8FCEEE;
+      --navy:#092A40; --warn:#b8870c; --warn-bg:#fff7e0;
+      --danger:#e45138; --danger-bg:#fdeee6;
+      --ok:#28a745; --ok-bg:#e6f5ea;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin:0; padding:0; height:100%; background:var(--surface); color:var(--ink);
+                 font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif; }
+
+    /* ===== Desktop app layout =====
+       Two-pane on screens ≥ 960px: left sidebar (coach + activity) + main.
+       Single column on narrow screens.
+    */
+    .app { display:flex; flex-direction:column; min-height:100vh; }
+    .app-body { display:grid; grid-template-columns: 1fr; gap:0;
+                max-width: 1600px; width:100%; margin:0 auto; flex:1 0 auto; }
+    .sidebar { display:none; }
+    main { padding: 16px; padding-bottom: 96px; }
+
+    @media (min-width: 960px) {
+      .app-body { grid-template-columns: 320px minmax(0, 1fr); }
+      .sidebar { display:flex; flex-direction:column; gap:16px;
+                 padding: 18px 14px; background:#fff;
+                 border-right:1px solid var(--border);
+                 position:sticky; top:0; align-self:start;
+                 max-height: 100vh; overflow-y:auto; }
+      main { padding: 22px 28px 100px; max-width: none; }
+      .sidebar > .card { margin:0; }
+      .sidebar .coach { position:static; border-bottom:none; box-shadow:none;
+                        padding:0; background:transparent; }
+      .sidebar .coach-actions { display:none; }  /* nav via stepper instead */
+      .sidebar .coach-stepper { max-height:none; margin-top:14px;
+                                padding-top:14px; border-top:1px solid var(--border);
+                                display:block !important; }
+      /* When desktop, hide the "All steps" toggle line and force stepper open */
+      .sidebar .coach-meta button#coachExpand { display:none; }
+      .footer-bar { left: auto !important; right:auto !important;
+                    max-width: 1600px; margin: 0 auto; }
+    }
+    @media (min-width: 1280px) {
+      main { padding: 28px 40px 100px; }
+      /* On extra-wide screens, arrange the top two cards (setup + scan)
+         side-by-side; packet card and recent feed stack beneath them. */
+      main .main-grid { display:grid; grid-template-columns: 1fr 1fr;
+                        gap:20px; align-items:start; }
+      main .main-grid > .span-2 { grid-column: 1 / -1; }
+    }
+    header.brand { padding: 12px 16px; background:var(--navy); border-bottom:3px solid var(--sky);
+             display:flex; align-items:center; gap:12px; color:#fff; }
+    header.brand .logo { height:28px; }
+    header.brand .titles { display:flex; flex-direction:column; line-height:1.1; }
+    header.brand .titles .sub { font-size:11px; color:var(--sky); letter-spacing:1.2px;
+                                text-transform:uppercase; font-weight:600; }
+    header.brand .titles .main { font-size:15px; font-weight:600; }
+    header.brand .pill { margin-left:auto; font-size:12px; padding:4px 9px; border-radius:999px;
+                   background:rgba(255,255,255,0.12); color:#cfe4f2; }
+    header.brand .pill.warn { background:rgba(221,179,24,0.25); color:#ffe48f; }
+    header.brand .pill + .pill { margin-left:6px; }
+    header.brand .brand-link { margin-left:auto; color:#fff; text-decoration:none;
+                              font-size:12px; padding: 5px 10px;
+                              border:1px solid rgba(255,255,255,0.25); border-radius:6px; }
+    header.brand .brand-link:hover { background:rgba(255,255,255,0.1); }
+    header.brand .brand-link + .pill { margin-left:8px; }
+    /* main default is set by .app layout above */
+    .card { background:var(--card); border:1px solid var(--border); border-radius:14px;
+            padding:16px; margin-bottom:16px;
+            box-shadow:0 1px 3px rgba(9,42,64,0.06); }
+    label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px;
+            text-transform:uppercase; letter-spacing:0.4px; font-weight:600; }
+    select, input, textarea {
+      width:100%; font-size:16px; padding:12px 14px; border-radius:10px;
+      border:1px solid var(--border); background:#fff; color:var(--ink);
+      transition:border-color 0.15s, box-shadow 0.15s;
+    }
+    select:focus, input:focus, textarea:focus {
+      outline:none; border-color:var(--accent);
+      box-shadow:0 0 0 3px rgba(6,120,205,0.15);
+    }
+    button {
+      width:100%; font-size:16px; padding:12px 14px; border-radius:10px;
+      background:var(--accent); color:#fff; border:none; font-weight:600;
+      cursor:pointer; transition:background 0.15s;
+    }
+    button:hover { background:var(--accent-dark); }
+    button.secondary { background:#fff; color:var(--accent); border:1px solid var(--border); }
+    button.secondary:hover { background:var(--accent-light); border-color:var(--accent); }
+    button.danger { background:var(--danger); color:#fff; }
+    button:disabled { opacity:0.5; cursor:not-allowed; }
+    .row { display:flex; gap:10px; }
+    .row > * { flex:1; }
+    #scanner { width:100%; aspect-ratio: 4/3; background:#000; border-radius:12px;
+               object-fit: cover; display:block; }
+    .scan-wrap { position:relative; }
+    .scan-overlay { position:absolute; inset:12% 12%; border:2px dashed var(--sky);
+                    border-radius:10px; pointer-events:none; }
+    .packet-card h2 { margin:0 0 6px; font-size:22px; color:var(--navy); }
+    .packet-card .meta { color:var(--ink-soft); font-size:13px; line-height:1.5; }
+    .packet-card .meta b { color:var(--navy); }
+    .pill-row { display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+    .pill-row span { font-size:11px; padding:3px 10px; border-radius:999px;
+                     background:var(--accent-light); color:var(--accent-dark); font-weight:500; }
+    .active-bar { background:#fff; border-bottom:1px solid var(--border); padding:8px 16px;
+                  display:flex; align-items:center; gap:8px; font-size:13px; color:var(--muted); }
+    .active-bar .lbl { color:var(--muted); }
+    .active-pill { background:var(--accent-light); color:var(--accent-dark);
+                   padding:3px 10px; border-radius:999px;
+                   font-weight:600; font-size:13px; }
+    .active-pill.tech { background:var(--warn-bg); color:var(--warn); }
+    .loaded-list { display:flex; flex-wrap:wrap; gap:8px; }
+    .loaded-list .nurs { display:flex; align-items:center; gap:6px;
+                        background:var(--accent-light); color:var(--accent-dark);
+                        padding:6px 10px; border-radius:10px; font-size:13px;
+                        border:1px solid transparent; }
+    .loaded-list .nurs.active { background:var(--accent); color:#fff;
+                                border-color:var(--accent-dark); }
+    .loaded-list .nurs button { width:auto; padding:2px 6px; background:transparent;
+                                color:inherit; border:none; font-size:13px;
+                                font-weight:500; cursor:pointer; }
+    .loaded-list .nurs button:hover { background:rgba(255,255,255,0.2); }
+    .loaded-list .nurs .count { opacity:0.7; font-size:11px; }
+    .find-results { margin-top:8px; max-height:240px; overflow-y:auto; }
+    .find-results .hit { padding:10px; background:#fff; border:1px solid var(--border);
+                         border-radius:8px; margin-bottom:6px; cursor:pointer; font-size:13px;
+                         color:var(--ink); }
+    .find-results .hit:hover { background:var(--accent-light); border-color:var(--accent); }
+    .link { width:auto; background:transparent; border:none; color:var(--muted); padding:0;
+            text-decoration:underline; cursor:pointer; font-size:13px; font-weight:400; }
+    .link:hover { background:transparent; color:var(--accent); }
+    .link.active { color:var(--accent); font-weight:600; }
+    .type-grid { display:grid; grid-template-columns: 1fr 1fr; gap:8px; margin-top:6px; }
+    .type-btn { background:#fff; color:var(--ink); font-size:14px; padding:14px 10px;
+                border-radius:10px; border:1px solid var(--border); text-align:left;
+                font-weight:500; cursor:pointer; transition:all 0.15s; }
+    .type-btn:hover { border-color:var(--accent); background:var(--accent-light); }
+    .type-btn.active { background:var(--accent); color:#fff; border-color:var(--accent-dark); }
+    .event-list { max-height: 180px; overflow-y:auto; font-size:13px; }
+    .event-list .ev { padding:8px 0; border-bottom:1px solid var(--border); color:var(--ink-soft); }
+    .event-list .ev b { color:var(--navy); }
+    .event-list .ev:last-child { border:none; }
+    .footer-bar { position:fixed; bottom:0; left:0; right:0;
+                  background:#fff; border-top:1px solid var(--border);
+                  padding: 10px 16px env(safe-area-inset-bottom) 16px;
+                  display:flex; gap:10px;
+                  box-shadow:0 -1px 6px rgba(9,42,64,0.06); }
+    .footer-bar > * { flex:1; }
+    .hint { font-size:12px; color:var(--muted); margin-top:6px; }
+    .ok { color: var(--ok); font-weight:500; }
+    .err { color: var(--danger); font-weight:500; }
+    .hidden { display:none !important; }
+    hr { border:none; border-top:1px solid var(--border); margin:14px 0; }
+    details summary { cursor:pointer; }
+
+    /* ─── Pre-start (landing only) state — hide everything else ─── */
+    body.show-landing #activeBar,
+    body.show-landing .sidebar,
+    body.show-landing .footer-bar,
+    body.show-landing main > .main-grid > section:not(#landingCard) { display:none !important; }
+    body.show-landing main { padding: 24px 18px 60px; }
+    @media (min-width: 960px) {
+      body.show-landing main { padding: 36px 32px 60px; max-width: 1200px; margin: 0 auto; }
+    }
+    /* When landing is hidden, the card disappears from the grid as well */
+    body:not(.show-landing) #landingCard { display:none !important; }
+
+    /* Landing / welcome card */
+    .landing { background: linear-gradient(135deg, #fff 0%, #f3f9fd 100%);
+               border:1px solid var(--border); border-radius:18px;
+               padding:32px 28px; margin-bottom:18px;
+               box-shadow:0 4px 16px rgba(9,42,64,0.06); position:relative; overflow:hidden; }
+    body.show-landing .landing { padding: 40px 36px; }
+    @media (min-width: 960px) { body.show-landing .landing { padding: 56px 48px; } }
+    .landing::before { content:""; position:absolute; top:-50px; right:-60px;
+                       width:280px; height:280px; border-radius:50%;
+                       background:radial-gradient(circle, rgba(58,179,229,0.15), transparent 70%); }
+    .landing-hero { display:grid; grid-template-columns: 1fr; gap:24px;
+                    position:relative; z-index:1; }
+    @media (min-width: 820px) {
+      .landing-hero { grid-template-columns: 1.3fr 1fr; align-items:center; }
+    }
+    .landing-text {}
+    .landing-pill { display:inline-block; font-size:11px; font-weight:700;
+                    text-transform:uppercase; letter-spacing:0.8px;
+                    color:var(--accent-dark); background:var(--accent-light);
+                    padding:5px 12px; border-radius:99px; }
+    .landing-h1 { font-size:34px; line-height:1.15; color:var(--navy);
+                  margin:14px 0 12px; font-weight:700; letter-spacing:-0.5px; }
+    @media (max-width: 600px) { .landing-h1 { font-size:26px; } }
+    .landing-sub { color:var(--ink-soft); font-size:15px; line-height:1.6;
+                   max-width:560px; margin:0 0 22px; }
+    .landing-cta { display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+    #landingStartBtn { width:auto; font-size:15px; padding:13px 26px; font-weight:600;
+                       background:var(--accent); color:#fff; border-radius:10px;
+                       box-shadow:0 2px 8px rgba(6,120,205,0.35); }
+    #landingStartBtn:hover { background:var(--accent-dark);
+                             box-shadow:0 4px 12px rgba(6,120,205,0.45);
+                             transform: translateY(-1px); }
+    .landing-link { color:var(--accent); text-decoration:none; font-size:14px;
+                    font-weight:500; padding:6px 0; }
+    .landing-link:hover { color:var(--accent-dark); text-decoration:underline; }
+    .landing-art { display:flex; justify-content:center; align-items:center; }
+    .landing-art svg { width:100%; max-width:340px; height:auto;
+                       filter: drop-shadow(0 8px 16px rgba(9,42,64,0.12)); }
+
+    .landing-phases { display:grid; grid-template-columns: 1fr;
+                      gap:14px; margin-top:30px; position:relative; z-index:1; }
+    @media (min-width: 760px) {
+      .landing-phases { grid-template-columns: 1fr 1fr 1fr; }
+    }
+    .phase-tile { background:#fff; border:1px solid var(--border); border-radius:12px;
+                  padding:18px 16px; }
+    .phase-tile-num { font-size:10px; font-weight:700; text-transform:uppercase;
+                      letter-spacing:0.6px; padding:3px 9px; border-radius:99px;
+                      color:#fff; display:inline-block; }
+    .phase-tile.p1 .phase-tile-num { background:var(--accent); }
+    .phase-tile.p2 .phase-tile-num { background:var(--accent-dark); }
+    .phase-tile.p3 .phase-tile-num { background:var(--navy); }
+    .phase-tile-title { font-size:16px; font-weight:600; color:var(--navy);
+                        margin:10px 0 6px; }
+    .phase-tile-body  { font-size:13px; color:var(--ink-soft); line-height:1.5; }
+    .phase-tile-tag   { font-size:11px; color:var(--muted); margin-top:10px;
+                        padding-top:8px; border-top:1px solid var(--border);
+                        font-style:italic; }
+
+    .landing-facts { display:flex; flex-wrap:wrap; gap:14px; margin-top:24px;
+                     padding-top:20px; border-top:1px solid var(--border);
+                     position:relative; z-index:1; }
+    .fact { flex:1 1 calc(50% - 14px); min-width:160px;
+            display:flex; align-items:center; gap:10px; }
+    @media (min-width: 760px) { .fact { flex:1 1 0; } }
+    .fact-num { font-size:22px; font-weight:700; color:var(--accent-dark);
+                background:var(--accent-light); width:42px; height:42px;
+                border-radius:10px; display:flex; align-items:center; justify-content:center; }
+    .fact-lbl { font-size:12px; color:var(--ink-soft); line-height:1.4; }
+
+    /* Workflow coach */
+    .coach { position:sticky; top:0; z-index:50; background:#fff;
+             border-bottom:1px solid var(--border);
+             box-shadow:0 2px 4px rgba(9,42,64,0.04); padding:10px 16px; }
+    .coach-top { display:flex; align-items:center; gap:10px; margin-bottom:6px; }
+    .coach-progress { flex:1; height:6px; background:var(--border); border-radius:99px; overflow:hidden; }
+    .coach-progress-bar { height:100%; background:linear-gradient(to right, var(--accent), var(--sky));
+                          width:0%; transition:width 0.4s ease; }
+    .coach-meta { display:flex; align-items:center; gap:8px; font-size:11px; color:var(--muted); }
+    .coach-phase { background:var(--accent-light); color:var(--accent-dark);
+                   padding:2px 8px; border-radius:99px; font-weight:600;
+                   text-transform:uppercase; letter-spacing:0.4px; }
+    .coach-num { font-weight:500; }
+    .coach-current { padding: 4px 0; }
+    .coach-title { font-size:14px; font-weight:600; color:var(--navy); }
+    .coach-body { font-size:12px; color:var(--ink-soft); margin-top:2px; line-height:1.4; }
+    .coach-actions { display:flex; gap:8px; margin-top:8px; }
+    .coach-actions button { font-size:13px; padding:8px 12px; flex:1; }
+    .coach-stepper { margin-top:12px; padding-top:12px; border-top:1px solid var(--border);
+                     max-height:280px; overflow-y:auto; }
+    .coach-stepper .step { display:flex; align-items:flex-start; gap:10px;
+                           padding:8px 6px; cursor:pointer; border-radius:6px;
+                           font-size:13px; }
+    .coach-stepper .step:hover { background:var(--accent-light); }
+    .coach-stepper .step.active { background:var(--accent); color:#fff; }
+    .coach-stepper .step.done .step-marker { background:var(--ok); color:#fff; }
+    .coach-stepper .step.current .step-marker { background:var(--accent); color:#fff; border-color:var(--accent); }
+    .coach-stepper .step.active .step-marker { background:#fff; color:var(--accent); }
+    .step-marker { display:inline-flex; align-items:center; justify-content:center;
+                   min-width:22px; height:22px; border-radius:99px;
+                   border:1.5px solid var(--border); background:#fff; color:var(--muted);
+                   font-size:11px; font-weight:600; flex-shrink:0; }
+    .step-body { flex:1; }
+    .step-title { font-weight:500; }
+    .step-hint { font-size:11px; color:var(--muted); margin-top:1px; }
+    .coach-stepper .step.active .step-hint { color:rgba(255,255,255,0.85); }
+    /* highlight pulse for the scrolled-to target */
+    .coach-glow { animation: coach-pulse 1.6s ease-out 2; }
+    @keyframes coach-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(6,120,205,0.0); }
+      30%  { box-shadow: 0 0 0 6px rgba(6,120,205,0.25); }
+      100% { box-shadow: 0 0 0 0 rgba(6,120,205,0.0); }
+    }
+
+    /* Admin panel */
+    .admin-card { padding:0; }
+    .adm-toggle { width:100%; text-align:left; background:transparent; color:var(--navy);
+                  font-weight:600; padding:14px 16px; border:none; cursor:pointer;
+                  display:flex; align-items:center; gap:8px; font-size:14px; }
+    .adm-toggle:hover { background:var(--accent-light); }
+    .adm-toggle .adm-chev { color:var(--accent); transition:transform 0.15s; display:inline-block; }
+    .adm-toggle[aria-expanded="true"] .adm-chev { transform:rotate(90deg); }
+    .adm-body { padding: 0 16px 16px 16px; }
+    .adm-h { margin: 14px 0 8px; font-size: 13px; color:var(--navy);
+             text-transform:uppercase; letter-spacing:0.4px; }
+    .adm-list-box { margin-top:8px; max-height:240px; overflow:auto;
+                    background:var(--surface); border:1px solid var(--border);
+                    border-radius:8px; padding:10px; font-size:12px; }
+    .adm-list-box table { width:100%; border-collapse:collapse; font-size:12px; }
+    .adm-list-box th { background:var(--accent-light); color:var(--accent-dark);
+                       text-align:left; padding:5px 7px; position:sticky; top:0; }
+    .adm-list-box td { padding:4px 7px; border-bottom:1px solid var(--border); }
+    .adm-list-box tr.bulk td { background:#fff7e0; }
+    .spike-row { display:grid; grid-template-columns: 50px 1fr 1fr 32px;
+                 gap:6px; align-items:center; margin-bottom:6px; }
+    .spike-row input { padding:6px 8px; font-size:13px; }
+    .spike-row .lbl { font-size:11px; color:var(--muted); text-transform:uppercase;
+                      font-weight:600; }
+    .spike-row .rm { background:transparent; color:var(--danger); border:none;
+                     font-size:18px; cursor:pointer; padding:0; }
+  </style>
+</head>
+<body>
+<div class="app">
+<header class="brand">
+  <img src="/static/ps-logo-white.svg" alt="Pacific Seeds" class="logo" />
+  <div class="titles">
+    <span class="sub">R&amp;D Sorghum</span>
+    <span class="main">Nursery Fieldbook</span>
+  </div>
+  <a href="/" class="brand-link" title="How this app works">How it works</a>
+  <span id="onlineStatus" class="pill">online</span>
+  <span id="outboxStatus" class="pill">outbox: 0</span>
+</header>
+
+<!-- Active nursery + tech bar, always visible -->
+<div id="activeBar" class="active-bar hidden">
+  <span class="lbl">Active:</span>
+  <span id="activeNursery" class="active-pill">—</span>
+  <span class="lbl" style="margin-left:8px">Tech:</span>
+  <span id="activeTech" class="active-pill tech">—</span>
+  <button class="link" id="switchBtn">Switch / add…</button>
+</div>
+
+<div class="app-body">
+
+<!-- Left sidebar on desktop; folds into top stripe on mobile -->
+<aside class="sidebar">
+
+<!-- Workflow coach — sticky guide to the 13-step workflow -->
+<div id="coachBar" class="coach hidden">
+  <div class="coach-top">
+    <div class="coach-progress">
+      <div class="coach-progress-bar" id="coachBarFill"></div>
+    </div>
+    <div class="coach-meta">
+      <span class="coach-phase" id="coachPhase">Phase 1</span>
+      <span class="coach-num" id="coachNum">Step 1 of 13</span>
+      <button class="link" id="coachExpand">All steps ▾</button>
+    </div>
+  </div>
+  <div class="coach-current">
+    <div class="coach-title" id="coachTitle">—</div>
+    <div class="coach-body"  id="coachBody">—</div>
+  </div>
+  <div class="coach-actions">
+    <button class="secondary" id="coachBack">← Back</button>
+    <button class="secondary" id="coachDone">✓ Mark done</button>
+    <button id="coachNext">Next →</button>
+  </div>
+  <div id="coachStepper" class="coach-stepper hidden"></div>
+</div>
+
+</aside>
+
+<main>
+<div class="main-grid">
+
+  <!-- Landing now lives at the root URL — this card is unused. -->
+  <section class="landing span-2 hidden" id="landingCard" hidden>
+    <div class="landing-hero">
+      <div class="landing-text">
+        <span class="landing-pill">R&amp;D Sorghum</span>
+        <h1 class="landing-h1">Pacific Seeds Nursery Fieldbook</h1>
+        <p class="landing-sub">
+          From PRISM to the paddock — digital. QR-scan packets, capture
+          replacements, planting errors, sprays and AB bag pulls on a phone
+          (works offline), then hand a Fieldbook back to the breeder. The Hub
+          dashboard stays live the whole time.
+        </p>
+        <div class="landing-cta">
+          <button id="landingStartBtn">▶ Get started</button>
+          <a href="/how-it-works" class="landing-link">How it works →</a>
+          <a href="/dashboard" class="landing-link">Hub dashboard →</a>
+        </div>
+      </div>
+      <div class="landing-art" aria-hidden="true">
+        <svg viewBox="0 0 320 220" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#3AB3E5"/>
+              <stop offset="100%" stop-color="#0678CD"/>
+            </linearGradient>
+          </defs>
+          <!-- background card -->
+          <rect x="20" y="20" width="280" height="180" rx="14" fill="#fff" stroke="#d8e3ed"/>
+          <!-- header strip -->
+          <rect x="20" y="20" width="280" height="32" fill="#092A40" rx="14"/>
+          <rect x="20" y="44" width="280" height="3" fill="#3AB3E5"/>
+          <circle cx="36" cy="36" r="5" fill="#3AB3E5"/>
+          <text x="48" y="40" font-family="Helvetica" font-weight="700" fill="#fff" font-size="10">PACIFIC SEEDS</text>
+          <text x="282" y="40" text-anchor="end" font-family="Helvetica" fill="#8FCEEE" font-size="9">AUGT1-26S-IMI</text>
+          <!-- QR sample -->
+          <g transform="translate(38,62)">
+            <rect width="48" height="48" fill="#0678CD" rx="2"/>
+            <rect x="4" y="4" width="40" height="40" fill="#fff"/>
+            <g fill="#092A40">
+              <rect x="8"  y="8" width="6" height="6"/><rect x="20" y="8" width="6" height="6"/><rect x="32" y="8" width="6" height="6"/>
+              <rect x="8"  y="20" width="6" height="6"/><rect x="26" y="20" width="6" height="6"/>
+              <rect x="14" y="26" width="6" height="6"/><rect x="32" y="26" width="6" height="6"/>
+              <rect x="8"  y="32" width="6" height="6"/><rect x="20" y="32" width="6" height="6"/><rect x="32" y="32" width="6" height="6"/>
+            </g>
+          </g>
+          <text x="100" y="76" font-family="Helvetica" font-weight="700" fill="#092A40" font-size="13">Plot 2_8</text>
+          <text x="100" y="89" font-family="Helvetica" font-weight="600" fill="#0678CD" font-size="10">Spike 1 · Rack 19</text>
+          <text x="100" y="102" font-family="Helvetica" fill="#34526e" font-size="9">IMIAAT190015:4</text>
+          <text x="100" y="113" font-family="Helvetica" fill="#34526e" font-size="9">BC3 · CMS A</text>
+          <!-- event tiles row -->
+          <g font-family="Helvetica" font-size="9" font-weight="600">
+            <rect x="38"  y="130" width="58" height="22" rx="6" fill="url(#lg)"/>
+            <text x="67"  y="145" text-anchor="middle" fill="#fff">🔄 Replace</text>
+            <rect x="102" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="131" y="145" text-anchor="middle" fill="#0678CD">⚠️ Error</text>
+            <rect x="166" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="195" y="145" text-anchor="middle" fill="#0678CD">💧 Spray</text>
+            <rect x="230" y="130" width="58" height="22" rx="6" fill="#e9f3fc" stroke="#0678CD"/>
+            <text x="259" y="145" text-anchor="middle" fill="#0678CD">📦 AB pull</text>
+          </g>
+          <!-- save bar -->
+          <rect x="38" y="164" width="250" height="24" rx="6" fill="#092A40"/>
+          <text x="163" y="180" text-anchor="middle" font-family="Helvetica" font-weight="700" fill="#fff" font-size="11">Save replacement</text>
+        </svg>
+      </div>
+    </div>
+
+    <!-- Three-phase summary -->
+    <div class="landing-phases">
+      <div class="phase-tile p1">
+        <div class="phase-tile-num">Phase 1</div>
+        <div class="phase-tile-title">Prep at the desk</div>
+        <div class="phase-tile-body">Upload the PRISM export, auto-detect spikes from the Map tab, build the Nursery list, and print QR-coded packet labels.</div>
+        <div class="phase-tile-tag">5 steps · breeder/admin</div>
+      </div>
+      <div class="phase-tile p2">
+        <div class="phase-tile-num">Phase 2</div>
+        <div class="phase-tile-title">Field operations</div>
+        <div class="phase-tile-body">Scan a packet QR (or find by plot). Tap an event tile — replacement, planting error, spray, AB bag pull. Saves offline and syncs when online.</div>
+        <div class="phase-tile-tag">4 event types · field tech</div>
+      </div>
+      <div class="phase-tile p3">
+        <div class="phase-tile-num">Phase 3</div>
+        <div class="phase-tile-title">Sync & hand back</div>
+        <div class="phase-tile-body">Pull the updated PRISM file, generate the multi-tab Fieldbook for upload, and watch the Hub dashboard aggregate every nursery in real time.</div>
+        <div class="phase-tile-tag">4 steps · always live</div>
+      </div>
+    </div>
+
+    <!-- Bottom strip with key facts -->
+    <div class="landing-facts">
+      <div class="fact"><div class="fact-num">13</div><div class="fact-lbl">Workflow steps · guided coach</div></div>
+      <div class="fact"><div class="fact-num">📶</div><div class="fact-lbl">Offline-first · IndexedDB outbox</div></div>
+      <div class="fact"><div class="fact-num">🔄</div><div class="fact-lbl">Multi-tech sync · idempotent</div></div>
+      <div class="fact"><div class="fact-num">📱</div><div class="fact-lbl">Phone-friendly · install as app</div></div>
+    </div>
+  </section>
+
+  <!-- Step 1: pick or add nursery -->
+  <section class="card" id="setupCard">
+    <label>Loaded nurseries</label>
+    <div id="loadedList" class="loaded-list"><div class="hint">None cached yet.</div></div>
+    <hr />
+    <label for="nurseryPick">Add / refresh nursery</label>
+    <select id="nurseryPick"><option value="">— choose nursery —</option></select>
+    <div style="height:10px"></div>
+    <label for="techId">Your name / initials</label>
+    <input id="techId" placeholder="e.g. TA" autocomplete="given-name" />
+    <div style="height:14px"></div>
+    <button id="loadBtn">Load nursery for offline use</button>
+    <p class="hint" id="manifestHint"></p>
+  </section>
+
+  <!-- Step 2: scan -->
+  <section class="card hidden" id="scanCard" data-coach-target="scan">
+    <div class="row" style="margin-bottom:10px">
+      <button id="scanBtn">📷 Scan packet QR</button>
+      <button class="secondary" id="findBtn">🔎 Find by plot</button>
+    </div>
+    <div id="scanArea" class="scan-wrap hidden">
+      <video id="scanner" autoplay muted playsinline></video>
+      <div class="scan-overlay"></div>
+      <div style="height:8px"></div>
+      <button class="secondary" id="stopScanBtn">Stop camera</button>
+    </div>
+    <div id="findArea" class="hidden">
+      <label for="plotInput">Plot (e.g. 2_8) or material ID</label>
+      <input id="plotInput" placeholder="2_8" autocomplete="off" />
+      <div id="findResults" class="find-results"></div>
+    </div>
+    <details style="margin-top:8px">
+      <summary class="hint">Or paste QR payload manually</summary>
+      <div style="height:6px"></div>
+      <input id="manualInput" placeholder="SNUR:AUGT1-26S-IMI:..." />
+      <div style="height:6px"></div>
+      <button class="secondary" id="manualGoBtn">Lookup payload</button>
+    </details>
+  </section>
+
+  <!-- Step 3: packet + event chooser + dynamic form -->
+  <section class="card packet-card hidden span-2" id="packetCard" data-coach-target="packet">
+    <h2 id="packetPlot">—</h2>
+    <div class="meta" id="packetMeta"></div>
+    <div class="pill-row" id="packetPills"></div>
+
+    <hr />
+
+    <label>What did you do at this packet?</label>
+    <div class="type-grid" id="typeGrid">
+      <button class="type-btn" data-type="replacement">🔄 Replacement</button>
+      <button class="type-btn" data-type="planting_error">⚠️ Planting error</button>
+      <button class="type-btn" data-type="spray">💧 Spray applied</button>
+      <button class="type-btn" data-type="ab_pull">📦 AB bag pulled</button>
+      <button class="type-btn" data-type="date_record">📅 Date record</button>
+      <button class="type-btn" data-type="note">📝 Note</button>
+    </div>
+
+    <div id="formArea" class="hidden">
+      <hr />
+      <div id="formFields"></div>
+      <label for="noteInput">Note (optional)</label>
+      <textarea id="noteInput" rows="2"></textarea>
+      <div style="height:14px"></div>
+      <div class="row">
+        <button id="saveBtn">Save</button>
+        <button class="secondary" id="cancelBtn">Cancel</button>
+      </div>
+      <p class="hint" id="saveHint"></p>
+    </div>
+  </section>
+
+  <!-- Recent events -->
+  <section class="card span-2">
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px">
+      <label style="margin:0; flex:1">Recent activity</label>
+      <button class="link" id="feedTabDevice">This device</button>
+      <button class="link active" id="feedTabAll">All techs</button>
+    </div>
+    <div class="event-list" id="recentList"><div class="hint">Nothing yet.</div></div>
+  </section>
+
+  <!-- ─── Admin panel (collapsed by default) ─── -->
+  <section class="card admin-card span-2">
+    <button class="adm-toggle" id="admToggle" aria-expanded="false">
+      <span class="adm-chev">▸</span>  Admin · Phase 1 prep + post-field
+    </button>
+    <div class="adm-body hidden" id="admBody">
+
+      <!-- Init from PRISM -->
+      <h3 class="adm-h" id="admInitHdr">Step 1 — Initialise from PRISM export</h3>
+      <label for="initCode">Nursery code</label>
+      <input id="initCode" placeholder="AUGT1-26S-IMI" />
+      <label for="initFile">PRISM export (.xlsx)</label>
+      <input id="initFile" type="file" accept=".xlsx" />
+      <p class="hint" id="initFileHint">Pick a file — the sheet list loads automatically.</p>
+      <label for="initSheet">Sheet inside the file</label>
+      <select id="initSheet" disabled>
+        <option value="">— pick a file first —</option>
+      </select>
+      <p class="hint" id="initSheetHint"></p>
+      <div style="height:8px"></div>
+      <button id="initBtn">▶ Initialise nursery</button>
+      <p class="hint" id="initStatus"></p>
+
+      <hr />
+
+      <!-- Step 2 — Nursery list -->
+      <h3 class="adm-h" id="admListHdr">Step 2 — Nursery list (auto)</h3>
+      <p class="hint">Unique Source IDs from the active nursery with Repeats and Qty Required (1.4 × reps).</p>
+      <div class="row">
+        <button class="secondary" id="listLoadBtn">Refresh list</button>
+        <button class="secondary" id="listCsvBtn">Copy CSV</button>
+      </div>
+      <div id="listResults" class="adm-list-box hint">Not loaded yet.</div>
+
+      <hr />
+
+      <!-- Step 4 / 11 downloads -->
+      <h3 class="adm-h" id="admDownloadsHdr">Step 4 — Packet PDF · Step 11 — Fieldbook</h3>
+      <div class="row">
+        <button class="secondary" id="pdfBtn">📄 Download Packet PDF</button>
+        <button class="secondary" id="fbBtn">📊 Download Fieldbook .xlsx</button>
+      </div>
+      <p class="hint" id="downloadHint"></p>
+
+      <hr />
+
+      <!-- Field Map editor -->
+      <h3 class="adm-h" id="admMapHdr">Step 3 — Field Map editor</h3>
+      <p class="hint">Define which field rows belong to which spike. Saving recomputes Spike + Rack Order for every packet.</p>
+      <div id="mapEditor"></div>
+      <div style="height:8px"></div>
+      <div class="row">
+        <button class="secondary" id="mapAddBtn">+ Add spike</button>
+        <button id="mapSaveBtn">💾 Save layout & recompute</button>
+      </div>
+      <p class="hint" id="mapStatus"></p>
+    </div>
+  </section>
+</div>
+</main>
+
+</div> <!-- /.app-body -->
+
+<div class="footer-bar">
+  <button class="secondary" id="syncBtn">Sync now</button>
+  <button class="secondary" id="resetBtn">Forget nursery</button>
+</div>
+</div> <!-- /.app -->
+
+<script src="/static/app.js"></script>
+</body>
+</html>
