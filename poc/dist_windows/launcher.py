@@ -133,11 +133,23 @@ class ServerThread(threading.Thread):
         try:
             log.info("Importing uvicorn + backend.app …")
             import uvicorn
+            # Pre-import uvicorn.logging so PyInstaller-bundled string refs
+            # ("uvicorn.logging.DefaultFormatter") resolve cleanly.
+            import uvicorn.logging  # noqa: F401
             from backend.app import app
             log.info("Imports OK. Building uvicorn Config (host=%s port=%s) …",
                      self.host, self.port)
-            config = uvicorn.Config(app, host=self.host, port=self.port,
-                                    log_level="warning")
+            # log_config=None bypasses uvicorn's dictConfig setup, which fails
+            # under some PyInstaller bundles with "Unable to configure formatter".
+            # Our root logger (above) already captures everything we need.
+            config = uvicorn.Config(
+                app,
+                host=self.host,
+                port=self.port,
+                log_level="warning",
+                log_config=None,
+                access_log=False,
+            )
             self._server = uvicorn.Server(config)
             log.info("Starting uvicorn.Server.run() …")
             self._server.run()
