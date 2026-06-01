@@ -1146,8 +1146,21 @@ async function coachAutoDetect(actionType) {
 }
 
 // ---------- Boot ----------
+// Service worker REMOVED — the launcher is a local desktop app, always online,
+// no offline value, and the SW kept serving stale app.js after updates.
+// On first load after the update, also clean up any leftover SW + cache from
+// previous installs so users never see stale code again.
 if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    if (regs.length > 0) {
+      console.log("Removing stale service worker(s):", regs.length);
+      regs.forEach(r => r.unregister());
+    }
+  }).catch(() => {});
+  if (window.caches && caches.keys) {
+    caches.keys().then(names => names.forEach(n => caches.delete(n)))
+      .catch(() => {});
+  }
 }
 setOnline(navigator.onLine);
 loadNurseryList();

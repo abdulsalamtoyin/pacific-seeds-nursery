@@ -1,34 +1,35 @@
-// Minimal cache-first service worker for shell assets.
-const CACHE = "sorghum-pwa-v3";
-const ASSETS = [
-  "/app",
-  "/static/app.js",
-  "/static/manifest.webmanifest",
-];
+// Service worker INTENTIONALLY EMPTY.
+//
+// Earlier versions cached app.js + the shell. That caching kept serving stale
+// app.js after updates, which led to confusing TDZ errors on inlined constants
+// that had been removed from the source. The launcher runs a local FastAPI on
+// the same machine, so there is no offline use case — every request hits the
+// in-process server anyway.
+//
+// This stub:
+//   1. Unregisters itself on install (so existing installations clean up).
+//   2. Deletes any previously cached responses.
+//   3. Never intercepts a fetch.
 
-self.addEventListener("install", e => {
-  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
+self.addEventListener("install", (event) => {
+  // Take over immediately
   self.skipWaiting();
 });
 
-self.addEventListener("activate", e => {
-  e.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
-  );
-  self.clients.claim();
+self.addEventListener("activate", (event) => {
+  event.waitUntil((async () => {
+    // Wipe every cache this SW (or earlier versions) ever created.
+    const keys = await caches.keys();
+    await Promise.all(keys.map((k) => caches.delete(k)));
+    // Tell controlled pages to reload so they fetch the fresh code.
+    const clients = await self.clients.matchAll({ type: "window" });
+    for (const c of clients) {
+      try { c.navigate(c.url); } catch (_) {}
+    }
+    // Then unregister ourselves so future loads bypass SW entirely.
+    self.registration.unregister();
+  })());
 });
 
-self.addEventListener("fetch", e => {
-  const url = new URL(e.request.url);
-  // Network-first for API; cache-first for the shell.
-  if (url.pathname.startsWith("/sync") || url.pathname.startsWith("/nursery")) {
-    return; // let it go to network; failures are handled in app.js via outbox
-  }
-  e.respondWith(
-    caches.match(e.request).then(r => r || fetch(e.request).then(resp => {
-      const clone = resp.clone();
-      caches.open(CACHE).then(c => c.put(e.request, clone));
-      return resp;
-    }).catch(() => caches.match("/app")))
-  );
-});
+// Pass every fetch through to the network — never serve from cache.
+self.addEventListener("fetch", () => { /* no-op; default browser fetch wins */ });
