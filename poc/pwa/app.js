@@ -828,13 +828,14 @@ $("#listCsvBtn").addEventListener("click", async () => {
 });
 
 // ----- Step 4 / 11: downloads -----
-$("#pdfBtn").addEventListener("click", async () => {
+$("#wbBtn").addEventListener("click", async () => {
   const meta = await idbGet("meta", "current");
   if (!meta) return alert("Pick a nursery first.");
-  const url = `/nursery/${encodeURIComponent(meta.nursery_code)}/packets.pdf`;
-  $("#downloadHint").textContent = "Opening packets PDF…";
-  window.open(url, "_blank");
-  await coachAutoDetect("pdf_downloaded");
+  const url = `/nursery/${encodeURIComponent(meta.nursery_code)}/workbook.xlsx`;
+  $("#downloadHint").innerHTML =
+    '<span class="ok">Downloading workbook — open the Packet Prep tab to view QR CODE column.</span>';
+  window.location.href = url;
+  await coachAutoDetect("workbook_downloaded");
 });
 $("#fbBtn").addEventListener("click", async () => {
   const meta = await idbGet("meta", "current");
@@ -967,8 +968,8 @@ const COACH_STEPS = [
   { n: 3, phase: 1, title: "Design the Field Map",
     body: "In the Field Map editor below, set how field rows map to spikes (e.g. Spike 1 = rows 1–10, Spike 2 = rows 11–26). Click Save to recompute Spike + Rack Order for every packet.",
     target: "#admMapHdr", openAdmin: true },
-  { n: 4, phase: 1, title: "Print the Packet PDF",
-    body: "Click Download Packet PDF in the Admin panel. Print the QR-coded labels (4×8 per A4 page) — one per packet — for the packeting team.",
+  { n: 4, phase: 1, title: "Download the Workbook",
+    body: "Click Download Workbook in the Admin panel. The Packet Prep tab carries the QR CODE text payload column for every packet — feed that file to your barcode-printing machine on another workstation.",
     target: "#admDownloadsHdr", openAdmin: true },
   { n: 5, phase: 1, title: "Sort packets for racking",
     body: "Packets are already in LSD radix (rack ↑, spike ↑) order in the Packet prep tab of the downloaded workbook. Print or sort physically by rack order; that's the pickup sequence for racking.",
@@ -1001,8 +1002,6 @@ const COACH_STEPS = [
     target: "#recentList" },
 ];
 
-const COACH_KEY_PREFIX = "coach:done:";
-
 async function coachCurrentNursery() {
   const meta = await idbGet("meta", "current");
   return meta?.nursery_code || "_none_";
@@ -1010,13 +1009,13 @@ async function coachCurrentNursery() {
 
 async function coachGetState() {
   const code = await coachCurrentNursery();
-  const raw = localStorage.getItem(COACH_KEY_PREFIX + code);
+  const raw = localStorage.getItem("coach:done:" + code);
   try { return raw ? JSON.parse(raw) : { current: 1, done: [] }; }
   catch { return { current: 1, done: [] }; }
 }
 async function coachSetState(s) {
   const code = await coachCurrentNursery();
-  localStorage.setItem(COACH_KEY_PREFIX + code, JSON.stringify(s));
+  localStorage.setItem("coach:done:" + code, JSON.stringify(s));
 }
 
 async function coachRender() {
@@ -1127,7 +1126,7 @@ async function coachAutoDetect(actionType) {
     init_success: 1,
     list_loaded: 2,
     map_saved: 3,
-    pdf_downloaded: 4,
+    workbook_downloaded: 4,
     event_replacement: 6,
     event_planting_error: 7,
     event_spray: 8,

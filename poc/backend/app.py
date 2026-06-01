@@ -390,14 +390,20 @@ def nursery_list(code: str) -> dict:
             "bulk_threshold": BULK_ABOVE, "items": items}
 
 
-@app.get("/nursery/{code}/packets.pdf")
-def packets_pdf(code: str) -> FileResponse:
-    """Step 4 — download the QR-coded packet PDF."""
-    pdf = OUT_DIR / f"{code}_packets.pdf"
-    if not pdf.exists():
-        raise HTTPException(404, f"PDF not built yet for {code}. Re-run init.")
-    return FileResponse(pdf, media_type="application/pdf",
-                        filename=f"{code}_packets.pdf")
+@app.get("/nursery/{code}/workbook.xlsx")
+def packets_workbook(code: str) -> FileResponse:
+    """Step 4 — download the full multi-tab workbook (Packet Prep + all tabs).
+
+    The Packet Prep tab carries the QR CODE text payload column, ready to be
+    fed into a barcode printer machine on a different workstation."""
+    wb = OUT_DIR / f"{code}_workbook.xlsx"
+    if not wb.exists():
+        raise HTTPException(404, f"Workbook not built yet for {code}. Re-run init.")
+    return FileResponse(
+        wb,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        filename=f"{code}_workbook.xlsx",
+    )
 
 
 @app.post("/admin/fieldbook/{code}")

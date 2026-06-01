@@ -3,35 +3,41 @@
 Replaces three VBA modules:
   - Recurrent file template.bas  → creates workbook tabs
   - Packetprinting.bas           → sorts, inserts Plot/SPIKE#/RACK ORDER columns
-  - (new) packet QR PDF generation
+  - Fieldbook template.bas       → Fieldbook tab
 
 Outputs:
   - data/nursery.sqlite (packets table seeded for this nursery)
-  - output/<nursery>_workbook.xlsx (the tab-structured workbook)
-  - output/<nursery>_packets.pdf (printable QR-coded packet labels)
+  - output/<nursery>_workbook.xlsx — the tab-structured workbook, with every
+    tab from the sample files populated:
+      Nursery site · Map · Nursery data · Packet Prep · Nursery list ·
+      Fieldbook · Replacements done · Planting error noted · Operations
+
+The Packet Prep tab is the key output: its QR CODE column contains a
+comma-joined text payload that another machine uses to print physical
+barcodes. We no longer generate a printable PDF of QR labels here.
 """
 from __future__ import annotations
 
 import argparse
-import io
 import sqlite3
 import uuid
+from collections import Counter
 from pathlib import Path
 
-import qrcode
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.units import mm
-from reportlab.pdfgen import canvas
+from openpyxl.utils import get_column_letter
 
 from map_parser import MapLayout, parse_map
 
+import os
+
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
-OUT_DIR = ROOT / "output"
+DATA_DIR = Path(os.environ.get("PS_DATA_DIR", str(ROOT / "data")))
+OUT_DIR  = Path(os.environ.get("PS_OUTPUT_DIR", str(ROOT / "output")))
 DB_PATH = DATA_DIR / "nursery.sqlite"
 
+# Raw PRISM export columns (in the order they appear in the sample files).
 PRISM_COLS = [
     "Range", "Row", "Material ID", "Inbred Code", "Source ID", "CMS reaction",
     "Generation", "Comments", "Pedigree", "Hybrid Code", "Trait Name",
@@ -39,10 +45,28 @@ PRISM_COLS = [
     "Entry Book Name", "Entry #",
 ]
 
-WORKBOOK_TABS = [
-    "Nursery site", "Field Map", "Material Map", "Nursery data", "Nursery list",
-    "Packet prep", "Replacements and errors", "Updated nursery site",
-    "Fieldbook", "Operations", "Comments", "Additionals",
+# Packet Prep tab columns (25 cols, matches the AUGT1-26S-IMI sample exactly).
+PACKET_PREP_COLS = [
+    "QR CODE", "Range", "Row", "Plot", "SPIKE#", "RACK ORDER",
+    "Thousands/Black", "Hundreds/Red", "Tens/Green", "Ones/Blue",
+    "Material ID", "Inbred Code", "Source ID", "CMS reaction",
+    "Generation", "Comments", "Pedigree", "Hybrid Code",
+    "Trait Name", "Plant #", "Loc Seq#", "SubSeq Flag",
+    "Entry Book Project", "Entry Book Name", "Entry #",
+]
+
+# Colored fonts for the four digit columns of RACK ORDER.
+DIGIT_COLORS = {
+    "Thousands/Black": "000000",
+    "Hundreds/Red":    "C00000",
+    "Tens/Green":      "00B050",
+    "Ones/Blue":       "0070C0",
+}
+
+# Fieldbook tab columns (10 cols, matches the sample).
+FIELDBOOK_COLS = [
+    "Range", "Row", "R_R", "Crossed bags", "Bagging Info",
+    "Material ID", "Source ID", "Gen", "CMS", "Comments",
 ]
 
 GROWTH_STAGES = [
@@ -54,6 +78,32 @@ GROWTH_STAGES = [
     ("Harvest",       (204, 255, 204)),
     ("Post Harvest",  (204, 204, 255)),
 ]
+
+# Filter helpers for the specialised tabs
+def _is_bc_generation(gen) -> bool:
+    """BC0, BC1, BC2, BC3 etc — used for BC labels + TFMSA Spray plots."""
+    if gen is None:
+        return False
+    s = str(gen).strip().upper()
+    return s.startswith("BC")
+
+def _is_recurrent(gen) -> bool:
+    """BC* and Fn — recurrent inbred work (Date recording / Pulling bags).
+    Excludes F1 (hybrids) and numbered Fn like F8 (selections)."""
+    if gen is None:
+        return False
+    s = str(gen).strip()
+    s_up = s.upper()
+    if s_up.startswith("BC"):
+        return True
+    # Match exactly "Fn" (the lowercase generic placeholder) but not F1/F2/.../F8
+    return s == "Fn" or s_up == "FN"
+
+def _is_hybrid_f1(gen) -> bool:
+    """F1 hybrid for height tracking."""
+    if gen is None:
+        return False
+    return str(gen).strip().upper() == "F1"
 
 
 def init_db() -> sqlite3.Connection:
@@ -123,6 +173,12 @@ def read_prism_export(path: Path, sheet: str) -> list[dict]:
             "comments":    cell(r, "Comments"),
             "pedigree":    cell(r, "Pedigree"),
             "hybrid_code": cell(r, "Hybrid Code"),
+            "trait_name":  cell(r, "Trait Name"),
+            "plant_no":    cell(r, "Plant #"),
+            "loc_seq":     cell(r, "Loc Seq#"),
+            "subseq_flag": cell(r, "SubSeq Flag"),
+            "entry_book_project": cell(r, "Entry Book Project"),
+            "entry_book_name":    cell(r, "Entry Book Name"),
             "entry_no":    cell(r, "Entry #"),
         })
     return out
@@ -190,173 +246,508 @@ def insert_packets(conn: sqlite3.Connection, nursery_code: str, packets: list[di
     conn.commit()
 
 
-def qr_payload(nursery_code: str, packet_uuid: str) -> str:
-    return f"SNUR:{nursery_code}:{packet_uuid}"
+def qr_text(p: dict) -> str:
+    """QR CODE payload in the original sample format:
+    `Plot,Material ID,Inbred Code,Source ID,CMS,Generation,Comments`
+    Empty fields keep their comma slot (so the format is parse-stable)."""
+    def f(k):
+        v = p.get(k)
+        return "" if v is None else str(v)
+    return ",".join([
+        f("plot"),
+        f("material_id"),
+        f("inbred_code"),
+        f("source_id"),
+        f("cms"),
+        f("generation"),
+        f("comments"),
+    ])
 
 
-def write_workbook(out_path: Path, nursery_code: str, packets: list[dict]) -> None:
+def rack_digits(rack_order: int) -> tuple[str, str, str, str]:
+    """Split RACK ORDER into 4 digits, left-padded with zeros.
+    Used by the color-coded packet labels — Thousands/Hundreds/Tens/Ones."""
+    s = f"{int(rack_order):04d}"
+    return s[0], s[1], s[2], s[3]
+
+
+def _format_header_row(ws, row_idx: int = 1, navy: str = "092A40",
+                       sky: str = "E9F3FC") -> None:
+    """Bold header row with PS navy text on light-blue fill + bottom border."""
+    bottom = Border(bottom=Side(style="medium", color=navy))
+    for c in ws[row_idx]:
+        c.font = Font(bold=True, color=navy, size=11)
+        c.fill = PatternFill("solid", fgColor=sky)
+        c.alignment = Alignment(horizontal="center", vertical="center",
+                                wrap_text=True)
+        c.border = bottom
+    ws.row_dimensions[row_idx].height = 26
+
+
+def _autosize(ws, max_cols: int, default: int = 13) -> None:
+    for i in range(1, max_cols + 1):
+        ws.column_dimensions[get_column_letter(i)].width = default
+
+
+def _write_grid_map(ws, packets: list[dict], value_key: str, title: str,
+                    layout: MapLayout | None = None) -> None:
+    """Build a 2D grid visualisation:
+       Y-axis = ranges descending, X-axis = field rows ascending,
+       cells = packet[value_key] at that (range, row) position.
+    Used for both Field Map (value_key='hybrid_code') and Material Map
+    (value_key='material_id')."""
+    if not packets:
+        return
+    max_range = max(p["range_n"] for p in packets)
+    max_row   = max(p["row_n"]   for p in packets)
+
+    navy = "092A40"; sky = "E9F3FC"; border_grey = "D8E3ED"
+    thin = Side(style="thin", color=border_grey)
+    cell_border = Border(top=thin, bottom=thin, left=thin, right=thin)
+
+    # Title + subtitle
+    ws.cell(row=1, column=1, value=title).font = Font(bold=True, size=14, color=navy)
+    ws.merge_cells(start_row=1, end_row=1, start_column=1, end_column=min(max_row + 2, 10))
+    ws.cell(row=2, column=1, value="Range numbers down the side · Field rows across the top").font = \
+        Font(italic=True, color="5A7896", size=10)
+    ws.merge_cells(start_row=2, end_row=2, start_column=1, end_column=min(max_row + 2, 10))
+
+    # Header row (field row numbers)
+    HDR_ROW = 3
+    c = ws.cell(row=HDR_ROW, column=1, value="Rng \\ Row")
+    c.font = Font(bold=True, color=navy)
+    c.fill = PatternFill("solid", fgColor=sky)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    c.border = cell_border
+    for col_idx, fr in enumerate(range(1, max_row + 1), start=2):
+        c = ws.cell(row=HDR_ROW, column=col_idx, value=fr)
+        c.font = Font(bold=True, color=navy)
+        c.fill = PatternFill("solid", fgColor=sky)
+        c.alignment = Alignment(horizontal="center")
+        c.border = cell_border
+    # Right-side label column (mirror, like the AUGT1 sample)
+    end_col = max_row + 2
+    c = ws.cell(row=HDR_ROW, column=end_col, value="Rng")
+    c.font = Font(bold=True, color=navy)
+    c.fill = PatternFill("solid", fgColor=sky)
+    c.alignment = Alignment(horizontal="center")
+    c.border = cell_border
+    ws.row_dimensions[HDR_ROW].height = 22
+
+    # Data rows (ranges descending — top range at top)
+    packet_by_pos = {(p["range_n"], p["row_n"]): p for p in packets}
+    spike_boundaries = set()
+    if layout:
+        # Add a coloured stripe at row boundaries between spikes
+        prev = None
+        for spike_no, rows in sorted(layout.row_order_in_spike.items()):
+            if not rows:
+                continue
+            if prev is not None:
+                # boundary between this spike and previous
+                spike_boundaries.add(min(rows))
+            prev = spike_no
+
+    for excel_row, rng in enumerate(range(max_range, 0, -1), start=HDR_ROW + 1):
+        # Range label (left side)
+        c = ws.cell(row=excel_row, column=1, value=rng)
+        c.font = Font(bold=True, color=navy)
+        c.fill = PatternFill("solid", fgColor=sky)
+        c.alignment = Alignment(horizontal="center")
+        c.border = cell_border
+
+        for fr in range(1, max_row + 1):
+            excel_col = fr + 1
+            p = packet_by_pos.get((rng, fr))
+            cell = ws.cell(row=excel_row, column=excel_col)
+            cell.border = cell_border
+            cell.alignment = Alignment(horizontal="center", vertical="center",
+                                       wrap_text=False)
+            if p:
+                value = p.get(value_key)
+                if value:
+                    cell.value = str(value)[:14]
+                    cell.font = Font(size=9, color=navy)
+            # Spike-boundary highlight on the LEFT edge of cells at boundary rows
+            if fr in spike_boundaries:
+                left = Side(style="medium", color="0678CD")
+                cell.border = Border(top=thin, bottom=thin, left=left, right=thin)
+
+        # Range label (right side mirror)
+        c = ws.cell(row=excel_row, column=end_col, value=rng)
+        c.font = Font(bold=True, color=navy)
+        c.fill = PatternFill("solid", fgColor=sky)
+        c.alignment = Alignment(horizontal="center")
+        c.border = cell_border
+
+    # Sizing
+    ws.column_dimensions["A"].width = 9
+    for col_idx in range(2, max_row + 2):
+        ws.column_dimensions[get_column_letter(col_idx)].width = 11
+    ws.column_dimensions[get_column_letter(end_col)].width = 7
+    ws.freeze_panes = ws.cell(row=HDR_ROW + 1, column=2)
+
+
+def _write_filtered_data_tab(ws, headers: list[str], packets: list[dict],
+                             col_map: list[str | None],
+                             filter_fn=None,
+                             intro_note: str | None = None) -> None:
+    """Generic filtered subset tab: header row + rows from packets[col_map]
+    for packets where filter_fn(p) is truthy."""
+    start_row = 1
+    if intro_note:
+        c = ws.cell(row=1, column=1, value=intro_note)
+        c.font = Font(italic=True, color="A0522D")
+        c.fill = PatternFill("solid", fgColor="FFF7E0")
+        ws.merge_cells(start_row=1, end_row=1,
+                       start_column=1, end_column=min(len(headers), 8))
+        start_row = 3
+    # Header
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=start_row, column=i, value=h)
+        c.font = Font(bold=True, color="092A40", size=11)
+        c.fill = PatternFill("solid", fgColor="E9F3FC")
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = Border(bottom=Side(style="medium", color="092A40"))
+    ws.row_dimensions[start_row].height = 26
+
+    # Data rows
+    rows_added = 0
+    for p in sorted(packets, key=lambda p: (p["range_n"], p["row_n"])):
+        if filter_fn and not filter_fn(p):
+            continue
+        ws.append([(p.get(k) if k else None) for k in col_map])
+        rows_added += 1
+
+    ws.freeze_panes = ws.cell(row=start_row + 1, column=1)
+    _autosize(ws, len(headers))
+    return rows_added
+
+
+def write_workbook(out_path: Path, nursery_code: str,
+                   packets: list[dict],
+                   nursery_name: str = "",
+                   season: str = "",
+                   breeder: str = "",
+                   layout: MapLayout | None = None) -> None:
+    """Produce the full multi-tab workbook from PRISM packets.
+
+    Tabs match the original AUGT1-26S-IMI sample exactly (15 tabs):
+      1. Nursery site         — raw PRISM data
+      2. Nursery data         — nursery header info
+      3. Field Map            — 2D grid (range × row) with Hybrid Code labels
+      4. Material Map         — 2D grid (range × row) with Material ID labels
+      5. Packet Prep ⭐       — 25-col table with QR CODE text + colored digits
+      6. Nursery list         — Source IDs (with Hybrid Code) grouped by count
+      7. Replacements done    — template (Qrcode, Replacement, Status)
+      8. Planting error noted — template
+      9. Fieldbook            — Range/Row/R_R/blanks/Material/Source/Gen/CMS/Comments
+     10. BC0 labels           — BC* generations only, with TFMSA / Pollen columns
+     11. Date recording       — recurrent (BC*, F*) packets with date columns
+     12. Pulling bags         — same packets as Date recording, bag-pulling tracker
+     13. Operations           — growth-stage template
+     14. Comments             — free-text team notes template
+     15. BC0 TFMSA record     — Day 7 / Day 10 / Day 13 TFMSA spray dates
+     16. TFMSA Spray plots    — BC* plots that get TFMSA
+     17. Hy Heights           — F1 hybrids only, height tracker
+    """
     wb = Workbook()
     wb.remove(wb.active)
 
-    # All standard tabs from the proposed workflow.
-    for name in WORKBOOK_TABS:
-        wb.create_sheet(name)
+    # ── 1. Nursery site (raw PRISM, sorted by range/row) ──
+    ns = wb.create_sheet("Nursery site")
+    ns.append(PRISM_COLS)
+    _format_header_row(ns)
+    for p in sorted(packets, key=lambda p: (p["range_n"], p["row_n"])):
+        ns.append([
+            p["range_n"], p["row_n"],
+            p.get("material_id"), p.get("inbred_code"), p.get("source_id"),
+            p.get("cms"), p.get("generation"), p.get("comments"),
+            p.get("pedigree"), p.get("hybrid_code"),
+            p.get("trait_name"), p.get("plant_no"), p.get("loc_seq"),
+            p.get("subseq_flag"), p.get("entry_book_project"),
+            p.get("entry_book_name"), p.get("entry_no"),
+        ])
+    ns.freeze_panes = "A2"
+    _autosize(ns, len(PRISM_COLS))
 
-    # Fieldbook banner.
-    fb = wb["Fieldbook"]
-    fb["A1"] = ('Download Nursery file from PRISM once the "Replacements and errors" '
-                'tab status is UPDATED')
-    fb["A1"].fill = PatternFill("solid", fgColor="FF0000")
-    fb["A1"].font = Font(bold=True)
+    # ── 2. Nursery data (header) ──
+    nd = wb.create_sheet("Nursery data")
+    nd["A1"] = "R&D Fieldbook - Grain Sorghum"
+    nd["A1"].font = Font(bold=True, size=14, color="092A40")
+    nd["A3"] = f"Nursery: {nursery_name or nursery_code}"
+    nd["A4"] = f"Code:    {nursery_code}"
+    if season:  nd["A5"] = f"Season:  {season}"
+    if breeder: nd["A6"] = f"Breeder: {breeder}"
+    nd.column_dimensions["A"].width = 60
 
-    # Replacements and errors header.
-    re_ws = wb["Replacements and errors"]
-    re_ws.append(["QR payload", "Plot", "Stage", "Original Source ID",
-                  "Replaced with", "Tech", "Captured at", "Status"])
-    for c in re_ws[1]:
-        c.font = Font(bold=True)
-        c.alignment = Alignment(horizontal="center")
-    re_ws.column_dimensions["A"].width = 28
-    re_ws.column_dimensions["E"].width = 30
+    # ── 3. Map (2D grid: Hybrid Code per range/row — "Field Map" view) ──
+    fm = wb.create_sheet("Map")
+    _write_grid_map(fm, packets, value_key="hybrid_code",
+                    title=f"Map — {nursery_code}",
+                    layout=layout)
 
-    # Operations tab styled with growth stages.
-    ops = wb["Operations"]
+    # ── 4. Material Map (2D grid: Material ID per range/row) ──
+    mm = wb.create_sheet("Material Map")
+    _write_grid_map(mm, packets, value_key="material_id",
+                    title=f"Material Map — {nursery_code}",
+                    layout=layout)
+
+    # ── 5. Packet Prep ⭐ (25 cols, exact sample-match) ──
+    pp = wb.create_sheet("Packet Prep")
+    pp.append(PACKET_PREP_COLS)
+    _format_header_row(pp)
+    sorted_packets = sorted(packets, key=lambda p: (p["spike"], p["rack_order"]))
+    for p in sorted_packets:
+        th, hu, te, on = rack_digits(p["rack_order"])
+        pp.append([
+            qr_text(p),
+            p["range_n"], p["row_n"], p["plot"],
+            p["spike"], p["rack_order"],
+            th, hu, te, on,
+            p.get("material_id"), p.get("inbred_code"),
+            p.get("source_id"), p.get("cms"),
+            p.get("generation"), p.get("comments"),
+            p.get("pedigree"), p.get("hybrid_code"),
+            p.get("trait_name"), p.get("plant_no"), p.get("loc_seq"),
+            p.get("subseq_flag"), p.get("entry_book_project"),
+            p.get("entry_book_name"), p.get("entry_no"),
+        ])
+    # Color-code the four digit columns (Thousands/Hundreds/Tens/Ones).
+    for col_idx, name in enumerate(PACKET_PREP_COLS, start=1):
+        if name in DIGIT_COLORS:
+            color = DIGIT_COLORS[name]
+            for row in pp.iter_rows(min_row=2, min_col=col_idx, max_col=col_idx):
+                for c in row:
+                    c.font = Font(bold=True, color=color, size=11)
+                    c.alignment = Alignment(horizontal="center")
+    pp.freeze_panes = "B2"
+    _autosize(pp, len(PACKET_PREP_COLS), default=12)
+    pp.column_dimensions["A"].width = 38  # QR CODE column wider
+    pp.column_dimensions["D"].width = 9   # Plot
+    pp.column_dimensions["E"].width = 7   # SPIKE#
+    pp.column_dimensions["F"].width = 11  # RACK ORDER
+    for letter in ("G", "H", "I", "J"):
+        pp.column_dimensions[letter].width = 6  # digit columns
+
+    # ── 5. Nursery list (Source ID + Hybrid Code, with counts) ──
+    nl = wb.create_sheet("Nursery list")
+    nl.append(["", "", "Source ID (Hybrid Code)", "Repeats", "Qty Required",
+               "Inbred Code", "Hybrid Code", "Notes"])
+    _format_header_row(nl)
+    qty_per_packet = 1.4
+    groups: dict[str, dict] = {}
+    for p in packets:
+        sid = p.get("source_id") or "(unknown)"
+        hc = p.get("hybrid_code")
+        label = f"{sid} ({hc})" if hc else sid
+        g = groups.setdefault(label, {
+            "reps": 0,
+            "inbred": p.get("inbred_code") or "",
+            "hybrid": hc or "",
+        })
+        g["reps"] += 1
+    for label in sorted(groups):
+        g = groups[label]
+        nl.append([None, None, label, g["reps"],
+                   round(g["reps"] * qty_per_packet, 1),
+                   g["inbred"], g["hybrid"], None])
+    nl.freeze_panes = "A2"
+    nl.column_dimensions["C"].width = 42
+    for letter in ("D", "E"): nl.column_dimensions[letter].width = 12
+    for letter in ("F", "G", "H"): nl.column_dimensions[letter].width = 18
+
+    # ── 6. Fieldbook (10 cols, sorted serpentine by range then row) ──
+    fb = wb.create_sheet("Fieldbook")
+    fb.append(FIELDBOOK_COLS)
+    _format_header_row(fb)
+    for p in sorted(packets, key=lambda p: (p["range_n"], p["row_n"])):
+        fb.append([
+            p["range_n"], p["row_n"], p["plot"],
+            None, None,                                # Crossed bags, Bagging Info
+            p.get("material_id"), p.get("source_id"),
+            p.get("generation"), p.get("cms"),
+            p.get("comments"),
+        ])
+    fb.freeze_panes = "A2"
+    _autosize(fb, len(FIELDBOOK_COLS))
+    fb.page_setup.orientation = "landscape"
+    fb.page_setup.fitToWidth = 1
+    fb.print_options.horizontalCentered = True
+    # print_title_rows expects a fully-qualified row range
+    fb.print_title_rows = "$1:$1"
+
+    # ── 7. Replacements done (template, ready for PRISM upload) ──
+    rd = wb.create_sheet("Replacements done")
+    rd["A1"] = ("Rename this tab to 'Replacements done' once Breeder has "
+                "updated PRISM.")
+    rd["A1"].font = Font(italic=True, color="A0522D")
+    rd["A1"].fill = PatternFill("solid", fgColor="FFF7E0")
+    rd.append([])
+    rd.append(["Qrcode", "Replacement", "Status", "Notes"])
+    _format_header_row(rd, row_idx=3)
+    rd.column_dimensions["A"].width = 40
+    rd.column_dimensions["B"].width = 32
+    rd.column_dimensions["C"].width = 12
+    rd.column_dimensions["D"].width = 28
+
+    # ── 8. Planting error noted (template) ──
+    pe = wb.create_sheet("Planting error noted")
+    pe["A1"] = ("Rename this tab to 'Planting error noted' once Breeder has "
+                "updated PRISM.")
+    pe["A1"].font = Font(italic=True, color="A0522D")
+    pe["A1"].fill = PatternFill("solid", fgColor="FFF7E0")
+    pe.append([])
+    pe.append(["Plot", "Range", "Row", "Description",
+               "Severity", "Date noticed", "Status"])
+    _format_header_row(pe, row_idx=3)
+    for col, w in zip("ABCDEFG", (12, 8, 8, 40, 12, 14, 12)):
+        pe.column_dimensions[col].width = w
+
+    # ── 10. BC0 labels (BC* packets only — TFMSA / Pollen tracking) ──
+    bc = wb.create_sheet("BC0 labels")
+    bc_headers = ["Range", "Row", "Crossed bags", "TFMSA", "Pollen",
+                  "TFMSA/Pollen", "Nursery Name", "Bagging Info", "Material ID",
+                  "Source ID", "Gen", "CMS", "Comments"]
+    bc_cols = ["range_n", "row_n", None, None, None, None, None, None,
+               "material_id", "source_id", "generation", "cms", "comments"]
+    n_bc = _write_filtered_data_tab(bc, bc_headers, packets, bc_cols,
+                                    filter_fn=lambda p: _is_bc_generation(p.get("generation")))
+    # Stamp the Nursery Name column with the nursery code
+    if n_bc:
+        nn_col = bc_headers.index("Nursery Name") + 1
+        for r in range(2, n_bc + 2):
+            bc.cell(row=r, column=nn_col, value=nursery_code)
+
+    # ── 11. Date recording (recurrent BC*/F* packets) ──
+    dr = wb.create_sheet("Date recording")
+    dr_headers = ["Range", "Row", "Plot", "1", "2",
+                  "Material ID", "Source ID", "Gen", "CMS", "Comments"]
+    dr_cols = ["range_n", "row_n", "plot", None, None,
+               "material_id", "source_id", "generation", "cms", "comments"]
+    _write_filtered_data_tab(dr, dr_headers, packets, dr_cols,
+                             filter_fn=lambda p: _is_recurrent(p.get("generation")))
+
+    # ── 12. Pulling bags (same population as Date recording) ──
+    pb = wb.create_sheet("Pulling bags")
+    _write_filtered_data_tab(pb, dr_headers, packets, dr_cols,
+                             filter_fn=lambda p: _is_recurrent(p.get("generation")))
+
+    # ── 13. Operations (growth-stage template) ──
+    ops = wb.create_sheet("Operations")
     ops["A1"] = "Operations Overview"
-    ops["A1"].font = Font(bold=True)
-    ops["A1"].fill = PatternFill("solid", fgColor="A9D08E")
+    ops["A1"].font = Font(bold=True, size=14, color="092A40")
+    ops.merge_cells("A1:F1")
+    ops.append([])
+    ops.append(["Stage", "Plan", "Reminders", "Comments"])
+    _format_header_row(ops, row_idx=3)
     for i, (stage, rgb) in enumerate(GROWTH_STAGES, start=4):
         c = ops.cell(row=i, column=1, value=stage)
-        c.font = Font(bold=True)
+        c.font = Font(bold=True, color="092A40")
         c.fill = PatternFill("solid", fgColor="{:02X}{:02X}{:02X}".format(*rgb))
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        ops.row_dimensions[i].height = 30
+    ops.column_dimensions["A"].width = 16
+    for col in "BCD":
+        ops.column_dimensions[col].width = 36
+
+    # ── 14. Comments (free-text team notes) ──
+    cm = wb.create_sheet("Comments")
+    cm["A1"] = "Team Comments"
+    cm["A1"].font = Font(bold=True, size=14, color="092A40")
+    cm.merge_cells("A1:D1")
+    cm.append([])
+    cm.append(["Date", "Tech", "Topic", "Comment"])
+    _format_header_row(cm, row_idx=3)
+    for col, w in zip("ABCD", (14, 12, 18, 60)):
+        cm.column_dimensions[col].width = w
+
+    # ── 15. BC0 TFMSA record (Day 7 / Day 10 / Day 13 spray-dates template) ──
+    tr = wb.create_sheet("BC0 TFMSA record")
+    tr["A1"] = "BC0 TFMSA record"
+    tr["A1"].font = Font(bold=True, size=14, color="092A40")
+    tr["A2"] = ("Record TFMSA spray dates and crossing observations here.")
+    tr["A2"].font = Font(italic=True, color="5A7896")
+    tr.merge_cells("A1:N1"); tr.merge_cells("A2:N2")
+    # Header row at row 3: Day 7, Day 10, Day 13 (each spans 5 cols like sample)
+    headers_with_span = [("Day 7", 1), ("Day 10", 6), ("Day 13", 11)]
+    for label, start_col in headers_with_span:
+        c = tr.cell(row=3, column=start_col, value=label)
+        c.font = Font(bold=True, color="092A40", size=12)
+        c.fill = PatternFill("solid", fgColor="E9F3FC")
         c.alignment = Alignment(horizontal="center")
-        ops.cell(row=i, column=2, value="*")
-        ops.cell(row=i, column=3, value="*")
+        tr.merge_cells(start_row=3, end_row=3,
+                       start_column=start_col, end_column=start_col + 4)
+    # Sub-header at row 4: Range, Row, Source ID, CMS, Notes (repeated 3x)
+    for block_idx in range(3):
+        start_col = 1 + block_idx * 5
+        for offset, h in enumerate(["Range", "Row", "Source ID", "CMS", "Notes"]):
+            c = tr.cell(row=4, column=start_col + offset, value=h)
+            c.font = Font(bold=True, color="092A40", size=10)
+            c.fill = PatternFill("solid", fgColor="F3F7FB")
+            c.alignment = Alignment(horizontal="center")
+    tr.freeze_panes = "A5"
+    for i in range(1, 16):
+        tr.column_dimensions[get_column_letter(i)].width = 11
 
-    # Packet prep tab — what used to come from Step1/Step2 packet printing VBA.
-    pp = wb["Packet prep"]
-    pp.append(["QR payload", "Plot", "Range", "Row", "Spike", "Rack order",
-               "Material ID", "Source ID", "Generation", "CMS"])
-    for c in pp[1]:
-        c.font = Font(bold=True)
-    for p in sorted(packets, key=lambda p: (p["spike"], p["rack_order"])):
-        pp.append([
-            qr_payload(nursery_code, p["uuid"]),
-            p["plot"], p["range_n"], p["row_n"], p["spike"], p["rack_order"],
-            p["material_id"], p["source_id"], p["generation"], p["cms"],
-        ])
+    # ── 16. TFMSA Spray plots (BC* plots that get TFMSA) ──
+    sp = wb.create_sheet("TFMSA Spray plots")
+    sp["A1"] = "TFMSA Spray plots"
+    sp["A1"].font = Font(bold=True, size=14, color="092A40")
+    sp.merge_cells("A1:E1")
+    sp.append([])
+    sp_headers = ["Range", "Row", "Source ID", "CMS", "Gen"]
+    sp_cols = ["range_n", "row_n", "source_id", "cms", "generation"]
+    # Pre-write header at row 3
+    for i, h in enumerate(sp_headers, start=1):
+        c = sp.cell(row=3, column=i, value=h)
+        c.font = Font(bold=True, color="092A40")
+        c.fill = PatternFill("solid", fgColor="E9F3FC")
+        c.alignment = Alignment(horizontal="center")
+        c.border = Border(bottom=Side(style="medium", color="092A40"))
+    sp.row_dimensions[3].height = 24
+    # Filtered data rows
+    for p in sorted(packets, key=lambda p: (p["range_n"], p["row_n"])):
+        if _is_bc_generation(p.get("generation")):
+            sp.append([p.get(k) for k in sp_cols])
+    sp.freeze_panes = "A4"
+    _autosize(sp, len(sp_headers))
 
-    # Nursery list — unique source IDs with repeat count and qty required.
-    nl = wb["Nursery list"]
-    nl.append(["Source ID", "Repeats", "Qty required (1.4 × repeats)"])
-    for c in nl[1]:
-        c.font = Font(bold=True)
-    counts: dict[str, int] = {}
-    for p in packets:
-        sid = p["source_id"] or "(unknown)"
-        counts[sid] = counts.get(sid, 0) + 1
-    for sid in sorted(counts):
-        nl.append([sid, counts[sid], round(counts[sid] * 1.4, 1)])
+    # ── 17. Hy Heights (F1 hybrids — height tracking) ──
+    hh = wb.create_sheet("Hy Heights")
+    hh_headers = ["Range", "Row", "Height in CM", "Material ID",
+                  "Source ID", "Gen", "CMS"]
+    hh_cols = ["range_n", "row_n", None, "material_id",
+               "source_id", "generation", "cms"]
+    _write_filtered_data_tab(hh, hh_headers, packets, hh_cols,
+                             filter_fn=lambda p: _is_hybrid_f1(p.get("generation")))
 
-    out_path.parent.mkdir(exist_ok=True)
+    out_path.parent.mkdir(exist_ok=True, parents=True)
     wb.save(out_path)
 
 
-def write_packet_pdf(out_path: Path, nursery_code: str, packets: list[dict]) -> None:
-    """One QR-coded label per packet, 4 columns × 8 rows per A4 page.
-
-    Header band on each page carries the Pacific Seeds brand colour and
-    nursery code so a misplaced sheet of labels is still identifiable.
-    """
-    from reportlab.lib.colors import HexColor
-    from reportlab.lib.utils import ImageReader
-
-    PS_BLUE = HexColor("#0678CD")
-    PS_NAVY = HexColor("#092A40")
-    PS_ORANGE = HexColor("#e45138")
-
-    c = canvas.Canvas(str(out_path), pagesize=A4)
-    page_w, page_h = A4
-    band_h = 12 * mm
-    cols, rows = 4, 8
-    margin_x, margin_y = 8 * mm, 8 * mm
-    cell_w = (page_w - 2 * margin_x) / cols
-    cell_h = (page_h - band_h - 2 * margin_y) / rows
-
-    sorted_packets = sorted(packets, key=lambda p: (p["spike"], p["rack_order"]))
-    total_pages = (len(sorted_packets) + cols * rows - 1) // (cols * rows)
-
-    def draw_band(page_no: int):
-        c.setFillColor(PS_NAVY)
-        c.rect(0, page_h - band_h, page_w, band_h, fill=1, stroke=0)
-        c.setFillColor(HexColor("#3AB3E5"))
-        c.rect(0, page_h - band_h - 2, page_w, 2, fill=1, stroke=0)
-        c.setFillColor(HexColor("#FFFFFF"))
-        c.setFont("Helvetica-Bold", 11)
-        c.drawString(margin_x, page_h - 8 * mm, "Pacific Seeds")
-        c.setFont("Helvetica", 9)
-        c.setFillColor(HexColor("#8FCEEE"))
-        c.drawString(margin_x + 28 * mm, page_h - 8 * mm,
-                     f"Nursery {nursery_code}  ·  Page {page_no}/{total_pages}")
-
-    for i, p in enumerate(sorted_packets):
-        page_no = i // (cols * rows) + 1
-        if i % (cols * rows) == 0:
-            if i > 0:
-                c.showPage()
-            draw_band(page_no)
-        idx_on_page = i % (cols * rows)
-        col = idx_on_page % cols
-        row = idx_on_page // cols
-        x = margin_x + col * cell_w
-        y = page_h - band_h - margin_y - (row + 1) * cell_h
-
-        payload = qr_payload(nursery_code, p["uuid"])
-        qr_img = qrcode.make(payload, box_size=4, border=1)
-        buf = io.BytesIO(); qr_img.save(buf, format="PNG"); buf.seek(0)
-        c.drawImage(ImageReader(buf), x + 2 * mm, y + 8 * mm,
-                    width=cell_h - 12 * mm, height=cell_h - 12 * mm,
-                    preserveAspectRatio=True)
-
-        text_x = x + cell_h - 8 * mm
-        text_y = y + cell_h - 6 * mm
-        c.setFillColor(PS_NAVY)
-        c.setFont("Helvetica-Bold", 10)
-        c.drawString(text_x, text_y, f"Plot {p['plot']}")
-        c.setFillColor(PS_BLUE)
-        c.setFont("Helvetica-Bold", 8)
-        c.drawString(text_x, text_y - 11, f"Spike {p['spike']} · Rack {p['rack_order']}")
-        c.setFillColor(HexColor("#34526e"))
-        c.setFont("Helvetica", 7)
-        c.drawString(text_x, text_y - 20, f"Mat: {str(p['material_id'] or '')[:14]}")
-        c.drawString(text_x, text_y - 29, f"Src: {str(p['source_id'] or '')[:14]}")
-        c.drawString(text_x, text_y - 38, f"{p['generation'] or ''} · CMS {p['cms'] or ''}")
-        c.setFillColor(PS_ORANGE)
-        c.setFont("Helvetica-Oblique", 5)
-        c.drawString(x + 2 * mm, y + 2 * mm, payload)
-
-    c.save()
-
-
 def init_nursery(input_path: Path, nursery_code: str,
-                 sheet: str = "Sheet1") -> dict:
+                 sheet: str = "Sheet1",
+                 nursery_name: str = "",
+                 season: str = "",
+                 breeder: str = "") -> dict:
     """Run the full nursery initialisation pipeline. Callable from API code."""
-    OUT_DIR.mkdir(exist_ok=True)
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
     packets = read_prism_export(input_path, sheet)
     layout = parse_map(input_path)
     assign_spike_rack(packets, layout)
     conn = init_db()
     insert_packets(conn, nursery_code, packets)
     wb_path = OUT_DIR / f"{nursery_code}_workbook.xlsx"
-    write_workbook(wb_path, nursery_code, packets)
-    pdf_path = OUT_DIR / f"{nursery_code}_packets.pdf"
-    write_packet_pdf(pdf_path, nursery_code, packets)
+    write_workbook(wb_path, nursery_code, packets,
+                   nursery_name=nursery_name, season=season, breeder=breeder,
+                   layout=layout)
     return {
         "nursery_code": nursery_code,
         "packet_count": len(packets),
         "spike_count": (layout.spike_count if layout else 0),
         "map_source": (layout.sheet_name if layout else "(no Map found — serpentine fallback)"),
         "workbook_path": str(wb_path),
-        "pdf_path": str(pdf_path),
     }
 
 
@@ -367,14 +758,18 @@ def main() -> None:
     ap.add_argument("--nursery-code", required=True,
                     help="Short nursery code, e.g. AUGT1-26S-IMI")
     ap.add_argument("--sheet", default="Sheet1", help="Sheet name in the export")
+    ap.add_argument("--name", default="", help="Full nursery name")
+    ap.add_argument("--season", default="", help="Season label, e.g. 2026S")
+    ap.add_argument("--breeder", default="", help="Lead breeder name")
     args = ap.parse_args()
 
     print(f"Reading PRISM export {args.input} (sheet={args.sheet})…")
-    result = init_nursery(args.input, args.nursery_code, args.sheet)
+    result = init_nursery(args.input, args.nursery_code, args.sheet,
+                          nursery_name=args.name, season=args.season,
+                          breeder=args.breeder)
     print(f"  → {result['packet_count']} packets")
     print(f"  → Map: {result['map_source']} ({result['spike_count']} spike(s))")
     print(f"  → wrote {result['workbook_path']}")
-    print(f"  → wrote {result['pdf_path']}")
     print("Done.")
 
 

@@ -1,5 +1,5 @@
 // Minimal cache-first service worker for shell assets.
-const CACHE = "sorghum-pwa-v2";
+const CACHE = "sorghum-pwa-v3";
 const ASSETS = [
   "/app",
   "/static/app.js",
