@@ -109,6 +109,37 @@ def test_splits_match_python(js_output):
     assert [tuple(pair) for pair in js_output["splits"]] == expected
 
 
+@pytest.mark.parametrize("types,dates", [
+    (["Selection"], 1),
+    (["Selection"], 3),
+    (["AB"], 2),
+    (["Hybrid"], 1),
+    (["AB", "Hybrid"], 2),
+    (["Selection", "AB", "Hybrid", "Other"], 4),
+])
+def test_tabs_for_matches_python(tmp_path, types, dates):
+    """The generated JS spec must produce the same sheet list as the loader."""
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+
+    from excel_workflow.spec.loader import tabs_for
+
+    spec_js = PWA_DIR / "nursery-spec.js"
+    assert spec_js.exists(), "run: python -m excel_workflow.gen_spec_constants"
+
+    driver = tmp_path / "tabs.mjs"
+    driver.write_text(
+        f"import {{ tabsFor }} from {str(spec_js)!r};\n"
+        f"console.log(JSON.stringify(tabsFor({json.dumps(types)}, {dates})));\n",
+        encoding="utf-8",
+    )
+    proc = subprocess.run(["node", str(driver)], capture_output=True,
+                          text=True, timeout=30)
+    if proc.returncode != 0:
+        pytest.fail(f"node driver failed:\n{proc.stderr}")
+    assert json.loads(proc.stdout) == tabs_for(types, dates)
+
+
 def test_js_rejects_overlapping_splits(tmp_path):
     if shutil.which("node") is None:
         pytest.skip("node not installed")

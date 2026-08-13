@@ -8,12 +8,15 @@ Run: python -m excel_workflow.gen_spec_constants
 """
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 
 from excel_workflow.spec.loader import load_spec
 
 OUT_PATH = Path(__file__).resolve().parent / "vba" / "SpecConstants.bas"
+JS_OUT_PATH = (Path(__file__).resolve().parent.parent
+               / "pwa" / "nursery-spec.js")
 
 HEADER = '''Attribute VB_Name = "SpecConstants"
 '==============================================================================
@@ -60,9 +63,63 @@ def render_constants() -> str:
     return "\n".join(lines)
 
 
+def render_js() -> str:
+    """The same spec as an ES module, for the desktop app.
+
+    The app has to open from the filesystem as well as over HTTP, so the spec
+    ships as a module rather than something fetched at runtime.
+    """
+    spec = load_spec()
+    body = json.dumps(spec, indent=2, ensure_ascii=False)
+    return (
+        "// GENERATED FILE, DO NOT EDIT\n"
+        "//\n"
+        "// Produced by excel_workflow/gen_spec_constants.py from\n"
+        "// excel_workflow/spec/nursery_spec.json. Edit the JSON and re-run\n"
+        "// the generator; any manual change here is overwritten.\n"
+        "//\n"
+        "// This is the same spec the Excel builder and SpecConstants.bas read,\n"
+        "// so the desktop app's tabs cannot drift from the workbook's.\n"
+        "\n"
+        f"export const SPEC = {body};\n"
+        "\n"
+        "export function defaultTabs() {\n"
+        "  return [...SPEC.default_tabs];\n"
+        "}\n"
+        "\n"
+        "// Mirrors tabs_for() in excel_workflow/spec/loader.py.\n"
+        "export function tabsFor(nurseryTypes, plantingDates) {\n"
+        "  if (plantingDates < 1) {\n"
+        "    throw new RangeError(\n"
+        "      `plantingDates must be >= 1, got ${plantingDates}`);\n"
+        "  }\n"
+        "  const selected = new Set(nurseryTypes);\n"
+        "  const hits = (types) => types.some((t) => selected.has(t));\n"
+        "\n"
+        "  const tabs = [...SPEC.always_first, ...SPEC.hidden];\n"
+        "  for (const name of SPEC.default_tabs) {\n"
+        "    for (const [condName, rule] of Object.entries(SPEC.conditional)) {\n"
+        "      if (rule.before === name && hits(rule.types)) tabs.push(condName);\n"
+        "    }\n"
+        "    if (name in SPEC.fan_out) {\n"
+        "      for (let i = 1; i <= plantingDates; i++) tabs.push(`${name} ${i}`);\n"
+        "    } else {\n"
+        "      tabs.push(name);\n"
+        "    }\n"
+        "  }\n"
+        "  for (const [tab, types] of Object.entries(SPEC.extras)) {\n"
+        "    if (hits(types)) tabs.push(tab);\n"
+        "  }\n"
+        "  return tabs;\n"
+        "}\n"
+    )
+
+
 def main() -> None:
     OUT_PATH.write_text(render_constants(), encoding="utf-8")
     print(f"wrote {OUT_PATH}")
+    JS_OUT_PATH.write_text(render_js(), encoding="utf-8")
+    print(f"wrote {JS_OUT_PATH}")
 
 
 if __name__ == "__main__":
