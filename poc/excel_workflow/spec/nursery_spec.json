@@ -1,0 +1,80 @@
+{
+  "always_first": ["Home"],
+  "hidden": ["Settings"],
+  "default_tabs": [
+    "Nursery site",
+    "Material Map",
+    "Field Map",
+    "Nursery data",
+    "Packet Prep",
+    "Nursery list",
+    "Replacements and Errors",
+    "Updated nursery site",
+    "Fieldbook",
+    "Operations",
+    "Comments"
+  ],
+  "fan_out": {"Packet Prep": "planting_dates"},
+  "conditional": {"Date recording": {"types": ["AB"], "before": "Operations"}},
+  "extras": {
+    "BC0 labels": ["AB"],
+    "BC0 TFMSA record": ["AB"],
+    "Pulling bags": ["AB"],
+    "TFMSA Spray plots": ["Other"],
+    "Hy Heights": ["Hybrid"]
+  },
+  "nursery_types": ["Selection", "AB", "Hybrid", "Other"],
+  "fieldbook_columns": [
+    "Range", "Row", "Material ID", "Source ID", "Gen", "CMS", "Plot", "Comments"
+  ],
+  "date_recording_columns": [
+    {"name": "Group", "width": 6.29, "hidden": true},
+    {"name": "Range", "width": 6.86, "hidden": false},
+    {"name": "Row", "width": 5.43, "hidden": false},
+    {"name": "O/E", "width": 9.14, "hidden": true},
+    {"name": "S 1", "width": 5.14, "hidden": false},
+    {"name": "S 2", "width": 5.57, "hidden": false},
+    {"name": "Material ID", "width": 21.43, "hidden": false},
+    {"name": "Source ID", "width": 28.57, "hidden": false},
+    {"name": "Gen", "width": 5.14, "hidden": false},
+    {"name": "CMS", "width": 4.71, "hidden": false},
+    {"name": "In. Code", "width": 8.43, "hidden": false}
+  ],
+  "nursery_data_labels": [
+    "GPS coordinates",
+    "Planter",
+    "Seeds/side",
+    "Plot length",
+    "Alley way spacing",
+    "1st DOP and rows",
+    "2nd DOP and rows",
+    "3rd DOP and rows",
+    "Tag rows",
+    "Tagging date",
+    "1st bagging date",
+    "Last bagging date",
+    "1st crossing date",
+    "Last crossing date",
+    "Unused A-line bags removal date",
+    "Injection dates",
+    "Opening bags date",
+    "Closing bags date",
+    "Harvest date"
+  ],
+  "nursery_data_widths": {
+    "A": 10.71,
+    "B": 58.29,
+    "D": 9.14,
+    "F": 29.14,
+    "G": 59.57,
+    "H": 9.14
+  },
+  "fieldbook_print": {
+    "orientation": "landscape",
+    "paper": "A4",
+    "duplex": "short-edge",
+    "print_title_rows": "$1:$1",
+    "center_footer": "&P/&N",
+    "right_header": "filename"
+  }
+}

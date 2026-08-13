@@ -24,7 +24,10 @@ such conflict is recorded under Open Questions.
 
 1. The generated workbook contains exactly the 12 specified entries below, in
    order, plus `Home` and a hidden `Settings`. Entry 5 expands to one tab per
-   planting date, so the physical sheet count is `13 + N + (1 if AB)`.
+   planting date, so the physical sheet count is `12 + N + (1 if AB)` —
+   Home, Settings, and the ten default tabs that do not fan out, plus N
+   Packet Prep tabs. Packet Prep is replaced by its fan-out copies rather
+   than joined by them.
 2. The five currently-generated extra tabs survive as nursery-type conditional
    extras rather than being deleted.
 3. Excel and PWA implementations are behaviourally identical, verifiable by
