@@ -277,8 +277,8 @@ Public Sub btnGenerateAllTabs()
 
     ' Material Map carries the identifiers; Field Map is the bare grid the
     ' wizard writes planting information alongside.
-    BuildMap p, SHEET_MATERIAL_MAP, 3      ' value index 3 = Material ID
-    BuildMap p, SHEET_FIELD_MAP, 0         ' 0 = geometry only, no values
+    BuildMap p, SHEET_MATERIAL_MAP, Array(3, 4, 10)  ' Material / Inbred / Hybrid
+    BuildMap p, SHEET_FIELD_MAP, Array()             ' geometry only, no values
     BuildNurseryList p
 
     ' Fieldbook is deliberately NOT built here — it comes from
@@ -407,8 +407,11 @@ End Function
 '==============================================================================
 '  Map / Material Map — 2D grid (range × row) with value at each cell
 '==============================================================================
+'  valueIdxs is an array of indices into the packet array p():
+'    Material Map -> Array(3, 4, 10)  Material ID / Inbred Code / Hybrid Code
+'    Field Map    -> Array()          grid geometry only, no material info
 Private Sub BuildMap(ByRef p As Variant, ByVal sheetName As String, _
-                     ByVal valueIdx As Long)
+                     ByVal valueIdxs As Variant)
     Dim ws As Worksheet: Set ws = GetSheet(sheetName)
     If ws Is Nothing Then Exit Sub
     ws.Cells.Clear
@@ -470,11 +473,19 @@ Private Sub BuildMap(ByRef p As Variant, ByVal sheetName As String, _
     For i = 1 To n
         rng = CLng(p(i, 1)): rw = CLng(p(i, 2))
         If rng >= 1 And rng <= maxRange And rw >= 1 And rw <= maxRow Then
-            ' valueIdx 0 means draw the grid geometry only — that is the Field
-            ' Map, which carries no material information.
-            Dim v As String
-            If valueIdx = 0 Then v = "" Else v = S(p(i, valueIdx))
-            If Len(v) > 14 Then v = Left$(v, 14)
+            ' An empty valueIdxs draws grid geometry only — that is the Field
+            ' Map, which carries no material information. Otherwise stack each
+            ' requested identifier on its own line within the cell.
+            Dim v As String, k As Long, part As String
+            v = ""
+            For k = LBound(valueIdxs) To UBound(valueIdxs)
+                part = S(p(i, CLng(valueIdxs(k))))
+                If Len(part) > 14 Then part = Left$(part, 14)
+                If Len(part) > 0 Then
+                    If Len(v) > 0 Then v = v & vbLf
+                    v = v & part
+                End If
+            Next k
             grid(rng, rw) = v
         End If
     Next i
@@ -504,12 +515,52 @@ Private Sub BuildMap(ByRef p As Variant, ByVal sheetName As String, _
         outR = outR + 1
     Next rng
 
+    ' Bottom header — row numbers repeat along the foot so the map stays
+    ' readable when it is printed and read from the far end of the block.
+    Dim footRow As Long: footRow = outR
+    ws.Cells(footRow, 1).Value = "Rng \ Row"
+    ws.Cells(footRow, 1).Font.Bold = True
+    ws.Cells(footRow, 1).Interior.Color = HDR_PALE
+    ws.Cells(footRow, 1).HorizontalAlignment = xlCenter
+    For fr = 1 To maxRow
+        With ws.Cells(footRow, fr + 1)
+            .Value = fr
+            .Font.Bold = True
+            .Interior.Color = HDR_PALE
+            .HorizontalAlignment = xlCenter
+        End With
+    Next fr
+    With ws.Cells(footRow, maxRow + 2)
+        .Value = "Rng"
+        .Font.Bold = True
+        .Interior.Color = HDR_PALE
+        .HorizontalAlignment = xlCenter
+    End With
+
+    ' Grid borders and wrapping for the stacked identifiers
+    Dim nVals As Long: nVals = UBound(valueIdxs) - LBound(valueIdxs) + 1
+    With ws.Range(ws.Cells(HDR_ROW, 1), ws.Cells(footRow, maxRow + 2))
+        .Borders.LineStyle = xlContinuous
+        .Borders.Weight = xlThin
+        .WrapText = (nVals > 1)
+        .VerticalAlignment = xlCenter
+    End With
+
+    If nVals > 1 Then
+        For outR = HDR_ROW + 1 To footRow - 1
+            ws.Rows(outR).RowHeight = 12 * nVals + 4
+        Next outR
+    End If
+
     ' Column widths
     ws.Columns(1).ColumnWidth = 9
     For fr = 1 To maxRow
         ws.Columns(fr + 1).ColumnWidth = 11
     Next fr
     ws.Columns(maxRow + 2).ColumnWidth = 7
+
+    ws.Cells(2, 1).Value = "Range numbers down both sides · Field rows across " & _
+                           "top and bottom"
 End Sub
 
 
