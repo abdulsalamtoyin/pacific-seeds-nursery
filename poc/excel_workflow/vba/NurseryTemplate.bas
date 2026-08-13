@@ -284,12 +284,14 @@ Public Sub btnGenerateAllTabs()
     ' Fieldbook is deliberately NOT built here — it comes from
     ' 'Updated nursery site' via btnBuildFieldbook, after PRISM is re-exported.
 
+    ' TFMSA Spray plots filters BC* generations, and backcross plots only
+    ' exist in AB nurseries — so it belongs with the AB extras.
     If IsNurseryType("AB") Then
         BuildBC0Labels p, CStr(GetSetting("Nursery code"))
         BuildDateRecording p, SHEET_DATE_RECORDING
         BuildDateRecording p, SHEET_PULLING_BAGS
+        BuildTFMSASprayPlots p
     End If
-    If IsNurseryType("Other") Then BuildTFMSASprayPlots p
     If IsNurseryType("Hybrid") Then BuildHyHeights p
 
     btnBuildHomeNav
@@ -1090,6 +1092,116 @@ Private Function CountByStage(ByVal stageName As String) As Long
     Next r
     CountByStage = n
 End Function
+
+
+'==============================================================================
+'  v2 — Nursery list helpers
+'  From 'Sorghum nursery prep workflow.docx': check Inbred/Hybrid code columns
+'  for duplicates, and isolate the high-quantity rows for bulk treatment.
+'==============================================================================
+Public Sub btnCheckDuplicateCodes()
+    Const CLR_DUP As Long = 13421823          ' pale red
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_NURSERY_LIST)
+    If ws Is Nothing Then Exit Sub
+
+    Dim colInbred As Long, colHybrid As Long
+    colInbred = FindHeaderCol(ws, "Inbred Code", 5)
+    colHybrid = FindHeaderCol(ws, "Hybrid Code", 5)
+    If colInbred = 0 And colHybrid = 0 Then
+        MsgBox "Could not find 'Inbred Code' or 'Hybrid Code' in row 5 of '" & _
+               SHEET_NURSERY_LIST & "'. Run Step 2 first.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim total As Long
+    total = MarkDuplicatesInColumn(ws, colInbred, CLR_DUP) + _
+            MarkDuplicatesInColumn(ws, colHybrid, CLR_DUP)
+
+    ws.Activate
+    If total = 0 Then
+        MsgBox "No duplicate Inbred or Hybrid codes found.", vbInformation, _
+               "Duplicate check"
+    Else
+        MsgBox total & " duplicate code cell(s) highlighted.", vbExclamation, _
+               "Duplicate check"
+    End If
+End Sub
+
+Private Function MarkDuplicatesInColumn(ByVal ws As Worksheet, _
+                                        ByVal col As Long, _
+                                        ByVal fillColour As Long) As Long
+    If col = 0 Then Exit Function
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, col).End(xlUp).Row
+    If lastRow < 6 Then Exit Function
+
+    ' First pass counts, second pass colours — a value is only a duplicate
+    ' once it has been seen more than once, which one pass cannot know.
+    Dim seen As Object: Set seen = CreateObject("Scripting.Dictionary")
+    Dim r As Long, v As String
+    For r = 6 To lastRow
+        v = Trim(S(ws.Cells(r, col).Value))
+        If Len(v) > 0 Then
+            If seen.Exists(v) Then
+                seen(v) = seen(v) + 1
+            Else
+                seen.Add v, 1
+            End If
+        End If
+    Next r
+
+    Dim n As Long
+    For r = 6 To lastRow
+        v = Trim(S(ws.Cells(r, col).Value))
+        If Len(v) > 0 Then
+            If seen(v) > 1 Then
+                ws.Cells(r, col).Interior.Color = fillColour
+                n = n + 1
+            Else
+                ws.Cells(r, col).Interior.Pattern = xlNone
+            End If
+        End If
+    Next r
+    MarkDuplicatesInColumn = n
+End Function
+
+Public Sub btnFilterBulkTreatment()
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_NURSERY_LIST)
+    If ws Is Nothing Then Exit Sub
+
+    Dim colQty As Long
+    colQty = FindHeaderCol(ws, "Qty Required", 5)
+    If colQty = 0 Then
+        MsgBox "Could not find 'Qty Required' in row 5 of '" & _
+               SHEET_NURSERY_LIST & "'. Run Step 2 first.", vbExclamation
+        Exit Sub
+    End If
+
+    Dim threshold As String
+    threshold = InputBox( _
+        "Show Source IDs with Qty Required above:", _
+        "Bulk treatment filter", CStr(GetSetting("Filter bulk treatment above")))
+    If Len(Trim(threshold)) = 0 Then Exit Sub
+    SetSetting "Filter bulk treatment above", threshold
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, colQty).End(xlUp).Row
+    If lastRow < 6 Then
+        MsgBox "No rows to filter yet.", vbInformation
+        Exit Sub
+    End If
+
+    If ws.AutoFilterMode Then ws.AutoFilterMode = False
+    ws.Range(ws.Cells(5, 1), ws.Cells(lastRow, colQty)).AutoFilter _
+        Field:=colQty, Criteria1:=">" & CDbl(Val(threshold))
+
+    ws.Activate
+    MsgBox "Filtered to Source IDs needing more than " & threshold & "." & _
+           vbCrLf & vbCrLf & "Clear the filter from Data > Clear when done.", _
+           vbInformation, "Bulk treatment"
+End Sub
 
 
 '==============================================================================

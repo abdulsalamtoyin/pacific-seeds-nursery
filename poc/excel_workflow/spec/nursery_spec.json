@@ -20,7 +20,7 @@
     "BC0 labels": ["AB"],
     "BC0 TFMSA record": ["AB"],
     "Pulling bags": ["AB"],
-    "TFMSA Spray plots": ["Other"],
+    "TFMSA Spray plots": ["AB"],
     "Hy Heights": ["Hybrid"]
   },
   "nursery_types": ["Selection", "AB", "Hybrid", "Other"],
