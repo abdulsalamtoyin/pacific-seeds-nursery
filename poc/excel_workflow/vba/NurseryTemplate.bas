@@ -14,26 +14,10 @@ Attribute VB_Name = "NurseryTemplate"
 '==============================================================================
 Option Explicit
 
-' Tab names (must match build_workbooks.py)
-Public Const SHEET_HOME              As String = "Home"
-Public Const SHEET_SETTINGS          As String = "Settings"
-Public Const SHEET_NURSERY_SITE      As String = "Nursery site"
-Public Const SHEET_NURSERY_DATA      As String = "Nursery data"
-Public Const SHEET_MAP               As String = "Map"
-Public Const SHEET_MATERIAL_MAP      As String = "Material Map"
-Public Const SHEET_PACKET_PREP       As String = "Packet Prep"
-Public Const SHEET_NURSERY_LIST      As String = "Nursery list"
-Public Const SHEET_FIELDBOOK         As String = "Fieldbook"
-Public Const SHEET_REPLACEMENTS      As String = "Replacements done"
-Public Const SHEET_PLANTING_ERRORS   As String = "Planting error noted"
-Public Const SHEET_BC0_LABELS        As String = "BC0 labels"
-Public Const SHEET_DATE_RECORDING    As String = "Date recording"
-Public Const SHEET_PULLING_BAGS      As String = "Pulling bags"
-Public Const SHEET_OPERATIONS        As String = "Operations"
-Public Const SHEET_COMMENTS          As String = "Comments"
-Public Const SHEET_BC0_TFMSA         As String = "BC0 TFMSA record"
-Public Const SHEET_TFMSA_SPRAY       As String = "TFMSA Spray plots"
-Public Const SHEET_HY_HEIGHTS        As String = "Hy Heights"
+' Tab names live in SpecConstants.bas, generated from
+' excel_workflow/spec/nursery_spec.json by gen_spec_constants.py.
+' Do not re-declare them here — the generator is the single source of truth,
+' and a local copy is exactly the drift the spec file exists to prevent.
 
 ' Colours for the four digit columns on Packet Prep
 Public Const CLR_DIGIT_THOUSANDS     As Long = &H000000   ' Black
@@ -166,6 +150,20 @@ Public Sub btnInitNursery()
     If Len(code) = 0 Then Exit Sub
     SetSetting "Nursery code", code
 
+    ' Nursery type drives which conditional tabs and extras get built, so it
+    ' has to be captured before any tab generation runs.
+    Dim types As String
+    types = InputBox( _
+        "Nursery type(s) — comma separated." & vbCrLf & _
+        "Options: Selection, AB, Hybrid, Other", _
+        "Nursery type", CStr(GetSetting("Nursery types")))
+    If Len(Trim(types)) = 0 Then Exit Sub
+    SetSetting "Nursery types", types
+
+    Dim fName As String
+    fName = InputBox("File name for this workbook:", "File name", code)
+    If Len(Trim(fName)) > 0 Then SetSetting "File name", fName
+
     Dim ws As Worksheet: Set ws = GetSheet(SHEET_NURSERY_SITE)
     If ws Is Nothing Then
         MsgBox "Sheet '" & SHEET_NURSERY_SITE & "' not found.", vbCritical
@@ -268,31 +266,47 @@ Public Sub btnGenerateAllTabs()
         p(k, 17) = IIf(col_ent > 0,   src.Cells(r, col_ent).Value, "")
     Next r
 
-    ' Build each tab
-    BuildPacketPrep p, CStr(GetSetting("Nursery code"))
-    BuildMap p, SHEET_MAP, 10              ' value index 10 = Hybrid Code
-    BuildMap p, SHEET_MATERIAL_MAP, 3      ' value index 3  = Material ID
+    ' --- Build each tab -------------------------------------------------
+    ' Packet Prep fans out to one tab per planting date, set by the Field Map
+    ' wizard. Without the wizard there is a single split.
+    Dim nSplits As Long: nSplits = PlantingDateCount()
+    Dim sp As Long
+    For sp = 1 To nSplits
+        BuildPacketPrep p, CStr(GetSetting("Nursery code")), sp
+    Next sp
+
+    ' Material Map carries the identifiers; Field Map is the bare grid the
+    ' wizard writes planting information alongside.
+    BuildMap p, SHEET_MATERIAL_MAP, 3      ' value index 3 = Material ID
+    BuildMap p, SHEET_FIELD_MAP, 0         ' 0 = geometry only, no values
     BuildNurseryList p
-    BuildFieldbook p
-    BuildBC0Labels p, CStr(GetSetting("Nursery code"))
-    BuildDateRecording p, SHEET_DATE_RECORDING
-    BuildDateRecording p, SHEET_PULLING_BAGS
-    BuildTFMSASprayPlots p
-    BuildHyHeights p
+
+    ' Fieldbook is deliberately NOT built here — it comes from
+    ' 'Updated nursery site' via btnBuildFieldbook, after PRISM is re-exported.
+
+    If IsNurseryType("AB") Then
+        BuildBC0Labels p, CStr(GetSetting("Nursery code"))
+        BuildDateRecording p, SHEET_DATE_RECORDING
+        BuildDateRecording p, SHEET_PULLING_BAGS
+    End If
+    If IsNurseryType("Other") Then BuildTFMSASprayPlots p
+    If IsNurseryType("Hybrid") Then BuildHyHeights p
+
+    btnBuildHomeNav
 
     Application.Calculation = xlCalculationAutomatic
     Application.ScreenUpdating = True
     Application.CalculateFull
 
     MsgBox nRows & " packets read from PRISM." & vbCrLf & vbCrLf & _
-           "All 10 data tabs generated:" & vbCrLf & _
-           "  • Packet Prep (25 cols, QR text + colored digits)" & vbCrLf & _
-           "  • Map (Hybrid Code grid)" & vbCrLf & _
+           "Generated:" & vbCrLf & _
+           "  • Packet Prep 1.." & nSplits & " (QR text + colored digits, Split no.)" & vbCrLf & _
            "  • Material Map (Material ID grid)" & vbCrLf & _
-           "  • Nursery list, Fieldbook, BC0 labels" & vbCrLf & _
-           "  • Date recording, Pulling bags" & vbCrLf & _
-           "  • TFMSA Spray plots, Hy Heights" & vbCrLf & vbCrLf & _
-           "The Packet Prep tab has the QR CODE text payload column — " & _
+           "  • Field Map (grid — run the wizard for planting dates)" & vbCrLf & _
+           "  • Nursery list" & vbCrLf & _
+           "  • Nursery-type extras for: " & CStr(GetSetting("Nursery types")) & vbCrLf & vbCrLf & _
+           "Fieldbook is built later, from the 'Updated nursery site' tab." & vbCrLf & vbCrLf & _
+           "The Packet Prep tabs carry the QR CODE text payload column — " & _
            "send this workbook to the barcode-printing machine.", _
            vbInformation, "All tabs generated"
 End Sub
@@ -301,10 +315,11 @@ End Sub
 '==============================================================================
 '  Packet Prep — 25 cols, QR text + colored digit columns
 '==============================================================================
-Private Sub BuildPacketPrep(ByRef p As Variant, ByVal nurseryCode As String)
-    Dim ws As Worksheet: Set ws = GetSheet(SHEET_PACKET_PREP)
+Private Sub BuildPacketPrep(ByRef p As Variant, ByVal nurseryCode As String, _
+                            ByVal splitNo As Long)
+    Dim ws As Worksheet: Set ws = GetSheet(PacketPrepName(splitNo))
     If ws Is Nothing Then Exit Sub
-    ws.Range("A6:Z" & ws.Rows.Count).Clear
+    ws.Range("A6:AZ" & ws.Rows.Count).Clear
 
     Dim n As Long: n = UBound(p, 1)
     ' Compute spike + rack per packet (default: spike = range, rack = row)
@@ -317,9 +332,10 @@ Private Sub BuildPacketPrep(ByRef p As Variant, ByVal nurseryCode As String)
         rack(i) = CLng(p(i, 2))
     Next i
 
-    ' Output rows
+    ' Output rows — only the packets belonging to this split
     Dim outRow As Long: outRow = 6
     For i = 1 To n
+        If SplitForRow(CLng(p(i, 2))) <> splitNo Then GoTo NextPacket
         Dim plot As String: plot = CLng(p(i, 1)) & "_" & CLng(p(i, 2))
         ws.Cells(outRow, 1).Value = QRText(plot, p(i, 3), p(i, 4), p(i, 5), p(i, 6), p(i, 7), p(i, 8))
         ws.Cells(outRow, 2).Value = p(i, 1)       ' Range
@@ -327,37 +343,40 @@ Private Sub BuildPacketPrep(ByRef p As Variant, ByVal nurseryCode As String)
         ws.Cells(outRow, 4).Value = plot           ' Plot
         ws.Cells(outRow, 5).Value = spike(i)       ' SPIKE#
         ws.Cells(outRow, 6).Value = rack(i)        ' RACK ORDER
-        ' Colored digit columns (cols 7-10)
+        ' Column 7 is Split no.; digit and data columns shift right by one.
+        ws.Cells(outRow, 7).Value = splitNo
+        ' Colored digit columns (cols 8-11)
         Dim digits As String: digits = Format$(rack(i), "0000")
-        ws.Cells(outRow, 7).Value = Mid$(digits, 1, 1)
-        ws.Cells(outRow, 7).Font.Color = CLR_DIGIT_THOUSANDS
-        ws.Cells(outRow, 7).Font.Bold = True
-        ws.Cells(outRow, 8).Value = Mid$(digits, 2, 1)
-        ws.Cells(outRow, 8).Font.Color = CLR_DIGIT_HUNDREDS
+        ws.Cells(outRow, 8).Value = Mid$(digits, 1, 1)
+        ws.Cells(outRow, 8).Font.Color = CLR_DIGIT_THOUSANDS
         ws.Cells(outRow, 8).Font.Bold = True
-        ws.Cells(outRow, 9).Value = Mid$(digits, 3, 1)
-        ws.Cells(outRow, 9).Font.Color = CLR_DIGIT_TENS
+        ws.Cells(outRow, 9).Value = Mid$(digits, 2, 1)
+        ws.Cells(outRow, 9).Font.Color = CLR_DIGIT_HUNDREDS
         ws.Cells(outRow, 9).Font.Bold = True
-        ws.Cells(outRow, 10).Value = Mid$(digits, 4, 1)
-        ws.Cells(outRow, 10).Font.Color = CLR_DIGIT_ONES
+        ws.Cells(outRow, 10).Value = Mid$(digits, 3, 1)
+        ws.Cells(outRow, 10).Font.Color = CLR_DIGIT_TENS
         ws.Cells(outRow, 10).Font.Bold = True
-        ' Remaining PRISM cols (Material ID through Entry #) → cols 11-25
-        ws.Cells(outRow, 11).Value = p(i, 3)      ' Material ID
-        ws.Cells(outRow, 12).Value = p(i, 4)      ' Inbred Code
-        ws.Cells(outRow, 13).Value = p(i, 5)      ' Source ID
-        ws.Cells(outRow, 14).Value = p(i, 6)      ' CMS reaction
-        ws.Cells(outRow, 15).Value = p(i, 7)      ' Generation
-        ws.Cells(outRow, 16).Value = p(i, 8)      ' Comments
-        ws.Cells(outRow, 17).Value = p(i, 9)      ' Pedigree
-        ws.Cells(outRow, 18).Value = p(i, 10)     ' Hybrid Code
-        ws.Cells(outRow, 19).Value = p(i, 11)     ' Trait Name
-        ws.Cells(outRow, 20).Value = p(i, 12)     ' Plant #
-        ws.Cells(outRow, 21).Value = p(i, 13)     ' Loc Seq#
-        ws.Cells(outRow, 22).Value = p(i, 14)     ' SubSeq Flag
-        ws.Cells(outRow, 23).Value = p(i, 15)     ' Entry Book Project
-        ws.Cells(outRow, 24).Value = p(i, 16)     ' Entry Book Name
-        ws.Cells(outRow, 25).Value = p(i, 17)     ' Entry #
+        ws.Cells(outRow, 11).Value = Mid$(digits, 4, 1)
+        ws.Cells(outRow, 11).Font.Color = CLR_DIGIT_ONES
+        ws.Cells(outRow, 11).Font.Bold = True
+        ' Remaining PRISM cols (Material ID through Entry #) → cols 12-26
+        ws.Cells(outRow, 12).Value = p(i, 3)      ' Material ID
+        ws.Cells(outRow, 13).Value = p(i, 4)      ' Inbred Code
+        ws.Cells(outRow, 14).Value = p(i, 5)      ' Source ID
+        ws.Cells(outRow, 15).Value = p(i, 6)      ' CMS reaction
+        ws.Cells(outRow, 16).Value = p(i, 7)      ' Generation
+        ws.Cells(outRow, 17).Value = p(i, 8)      ' Comments
+        ws.Cells(outRow, 18).Value = p(i, 9)      ' Pedigree
+        ws.Cells(outRow, 19).Value = p(i, 10)     ' Hybrid Code
+        ws.Cells(outRow, 20).Value = p(i, 11)     ' Trait Name
+        ws.Cells(outRow, 21).Value = p(i, 12)     ' Plant #
+        ws.Cells(outRow, 22).Value = p(i, 13)     ' Loc Seq#
+        ws.Cells(outRow, 23).Value = p(i, 14)     ' SubSeq Flag
+        ws.Cells(outRow, 24).Value = p(i, 15)     ' Entry Book Project
+        ws.Cells(outRow, 25).Value = p(i, 16)     ' Entry Book Name
+        ws.Cells(outRow, 26).Value = p(i, 17)     ' Entry #
         outRow = outRow + 1
+NextPacket:
     Next i
 
     ' Sort by SPIKE# asc then RACK ORDER asc
@@ -451,7 +470,10 @@ Private Sub BuildMap(ByRef p As Variant, ByVal sheetName As String, _
     For i = 1 To n
         rng = CLng(p(i, 1)): rw = CLng(p(i, 2))
         If rng >= 1 And rng <= maxRange And rw >= 1 And rw <= maxRow Then
-            Dim v As String: v = S(p(i, valueIdx))
+            ' valueIdx 0 means draw the grid geometry only — that is the Field
+            ' Map, which carries no material information.
+            Dim v As String
+            If valueIdx = 0 Then v = "" Else v = S(p(i, valueIdx))
             If Len(v) > 14 Then v = Left$(v, 14)
             grid(rng, rw) = v
         End If
@@ -636,28 +658,56 @@ End Sub
 '  Date recording + Pulling bags — same data, same shape
 '==============================================================================
 Private Sub BuildDateRecording(ByRef p As Variant, ByVal sheetName As String)
+    ' 11-column layout from the client's 'Date recording' sample.
+    ' Group and O/E look like scaffolding but are load-bearing: Group is the
+    ' two-row band index the '2-rows together' button orders by, and O/E
+    ' carries the parity that drives the serpentine direction. Both are
+    ' hidden rather than removed.
     Dim ws As Worksheet: Set ws = GetSheet(sheetName)
     If ws Is Nothing Then Exit Sub
-    ws.Range("A6:Z" & ws.Rows.Count).Clear
+    ws.Cells.Clear
+
+    Dim headers As Variant
+    headers = Array("Group", "Range", "Row", "O/E", "S 1", "S 2", _
+                    "Material ID", "Source ID", "Gen", "CMS", "In. Code")
+    Dim widths As Variant
+    widths = Array(6.29, 6.86, 5.43, 9.14, 5.14, 5.57, 21.43, 28.57, 5.14, 4.71, 8.43)
+
+    Dim c As Long
+    For c = 0 To UBound(headers)
+        ws.Cells(1, c + 1).Value = headers(c)
+        ws.Cells(1, c + 1).Font.Bold = True
+        ws.Columns(c + 1).ColumnWidth = widths(c)
+    Next c
 
     Dim n As Long: n = UBound(p, 1)
-    Dim outR As Long: outR = 6
-    Dim i As Long, gen As String
+    Dim outR As Long: outR = 2
+    Dim i As Long, gen As String, rowNo As Long
     For i = 1 To n
         gen = S(p(i, 7))
         If IsRecurrent(gen) Then
-            ws.Cells(outR, 1).Value = p(i, 1)     ' Range
-            ws.Cells(outR, 2).Value = p(i, 2)     ' Row
-            ws.Cells(outR, 3).Value = CLng(p(i, 1)) & "_" & CLng(p(i, 2))   ' Plot
-            ' cols 4 ("1") and 5 ("2") blank
-            ws.Cells(outR, 6).Value = p(i, 3)     ' Material ID
-            ws.Cells(outR, 7).Value = p(i, 5)     ' Source ID
-            ws.Cells(outR, 8).Value = gen          ' Gen
-            ws.Cells(outR, 9).Value = p(i, 6)     ' CMS
-            ws.Cells(outR, 10).Value = p(i, 8)    ' Comments
+            rowNo = CLng(p(i, 2))
+            ws.Cells(outR, 1).Value = BandForRow(rowNo)     ' Group
+            ws.Cells(outR, 2).Value = p(i, 1)               ' Range
+            ws.Cells(outR, 3).Value = rowNo                 ' Row
+            ws.Cells(outR, 4).Value = ParityForRow(rowNo)   ' O/E
+            ' S 1 and S 2 stay empty — day-of-month numbers entered in field.
+            ws.Cells(outR, 7).Value = p(i, 3)               ' Material ID
+            ws.Cells(outR, 8).Value = p(i, 5)               ' Source ID
+            ws.Cells(outR, 9).Value = gen                   ' Gen
+            ws.Cells(outR, 10).Value = p(i, 6)              ' CMS
+            ws.Cells(outR, 11).Value = p(i, 4)              ' In. Code
             outR = outR + 1
         End If
     Next i
+
+    With ws.Range(ws.Cells(1, 1), ws.Cells(outR - 1, 11)).Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+    End With
+
+    ws.Columns(1).Hidden = True     ' Group
+    ws.Columns(4).Hidden = True     ' O/E
 End Sub
 
 
@@ -665,7 +715,7 @@ End Sub
 '  TFMSA Spray plots — BC* only
 '==============================================================================
 Private Sub BuildTFMSASprayPlots(ByRef p As Variant)
-    Dim ws As Worksheet: Set ws = GetSheet(SHEET_TFMSA_SPRAY)
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_TFMSA_SPRAY_PLOTS)
     If ws Is Nothing Then Exit Sub
     ws.Range("A6:Z" & ws.Rows.Count).Clear
 
@@ -717,24 +767,33 @@ End Sub
 '  Step 3 — Sort for racking (LSD Radix)
 '==============================================================================
 Public Sub btnSortForRacking()
-    Dim ws As Worksheet: Set ws = GetSheet(SHEET_PACKET_PREP)
+    ' Packet Prep is now one tab per split, so sort whichever split the user
+    ' is looking at; fall back to split 1 if they ran this from elsewhere.
+    Dim ws As Worksheet
+    If InStr(ActiveSheet.Name, SHEET_PACKET_PREP) = 1 Then
+        Set ws = ActiveSheet
+    Else
+        Set ws = GetSheet(PacketPrepName(1))
+    End If
     If ws Is Nothing Then Exit Sub
+
     Dim lastRow As Long
     lastRow = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
     If lastRow < 7 Then
-        MsgBox "Run Step 2 first.", vbExclamation
+        MsgBox "Run Step 2 first — '" & ws.Name & "' has no packets yet.", _
+               vbExclamation
         Exit Sub
     End If
     With ws.Sort
         .SortFields.Clear
         .SortFields.Add Key:=ws.Range(ws.Cells(6, 6), ws.Cells(lastRow, 6)), Order:=xlAscending
         .SortFields.Add Key:=ws.Range(ws.Cells(6, 5), ws.Cells(lastRow, 5)), Order:=xlAscending
-        .SetRange ws.Range(ws.Cells(6, 1), ws.Cells(lastRow, 25))
+        .SetRange ws.Range(ws.Cells(6, 1), ws.Cells(lastRow, 26))
         .Header = xlNo
         .Apply
     End With
     ws.Activate
-    MsgBox "Packet Prep re-sorted in LSD-radix racking order (rack ↑, spike ↑).", _
+    MsgBox ws.Name & " re-sorted in LSD-radix racking order (rack ↑, spike ↑).", _
            vbInformation, "Sorted"
 End Sub
 
@@ -750,9 +809,11 @@ Public Sub btnRecordABPull():      AddEventRow "ab_pull":              End Sub
 Private Sub AddEventRow(ByVal evType As String)
     Dim destSheet As String
     Select Case evType
-        Case "replacement":     destSheet = SHEET_REPLACEMENTS
-        Case "planting_error":  destSheet = SHEET_PLANTING_ERRORS
-        Case "spray":           destSheet = SHEET_TFMSA_SPRAY
+        ' Replacements and planting errors share one tab now; Stage tells
+        ' them apart on the row itself.
+        Case "replacement":     destSheet = SHEET_REPLACEMENTS_AND_ERRORS
+        Case "planting_error":  destSheet = SHEET_REPLACEMENTS_AND_ERRORS
+        Case "spray":           destSheet = SHEET_TFMSA_SPRAY_PLOTS
         Case "ab_pull":         destSheet = SHEET_PULLING_BAGS
     End Select
     Dim ws As Worksheet: Set ws = GetSheet(destSheet)
@@ -825,9 +886,11 @@ Public Sub btnPushToHub()
 
     Dim packets As Long, reps As Long, errs As Long, sprays As Long
     packets = CountRows(SHEET_NURSERY_SITE)
-    reps = CountRows(SHEET_REPLACEMENTS)
-    errs = CountRows(SHEET_PLANTING_ERRORS)
-    sprays = CountRows(SHEET_TFMSA_SPRAY)
+    ' One tab holds both now, so split the count on the Stage column rather
+    ' than counting the same rows twice.
+    reps = CountByStage("Packeting")
+    errs = CountByStage("Planting")
+    sprays = CountRows(SHEET_TFMSA_SPRAY_PLOTS)
 
     Dim ff As Integer, line As String
     Dim outLines As Collection: Set outLines = New Collection
@@ -863,6 +926,476 @@ nxt:
 cleanFail:
     Debug.Print "btnPushToHub failed: " & Err.Number & " " & Err.Description
 End Sub
+
+'==============================================================================
+'  v2 — ordering rules
+'  Ports of excel_workflow/nursery_algos.py. Keep in step with the Python
+'  originals; both are pinned by the same client-sample cases.
+'==============================================================================
+Public Function SpikeForRow(ByVal r As Long) As Long
+    ' A two-cone planter's cones swap sides when it turns around, so spikes
+    ' run 1,2 down the forward pass and 2,1 back up the reverse pass.
+    Dim cycle As Variant
+    cycle = Array(1, 2, 2, 1)
+    SpikeForRow = cycle((r - 1) Mod 4)
+End Function
+
+Public Function RunDirection(ByVal r As Long) As String
+    If (((r - 1) \ 2) Mod 2) = 0 Then
+        RunDirection = "forward"
+    Else
+        RunDirection = "reverse"
+    End If
+End Function
+
+Public Function BandForRow(ByVal r As Long) As Long
+    ' Rows 2 and 3 are band 1; rows 26 and 27 are band 13.
+    BandForRow = r \ 2
+End Function
+
+Public Function ParityForRow(ByVal r As Long) As String
+    If (r Mod 2) = 1 Then ParityForRow = "O" Else ParityForRow = "E"
+End Function
+
+Public Function SerpentineKey(ByVal rangeNo As Long, ByVal rowNo As Long) As Long
+    ' Rows descend on even ranges, ascend on odd. Negating on even ranges
+    ' collapses the snake into one sortable number.
+    If (rangeNo Mod 2) = 0 Then
+        SerpentineKey = -rowNo
+    Else
+        SerpentineKey = rowNo
+    End If
+End Function
+
+
+'==============================================================================
+'  v2 — nursery type + split helpers
+'==============================================================================
+Public Function IsNurseryType(ByVal t As String) As Boolean
+    Dim s As String
+    s = "," & Replace(LCase(CStr(GetSetting("Nursery types"))), " ", "") & ","
+    IsNurseryType = InStr(s, "," & LCase(t) & ",") > 0
+End Function
+
+Public Function PlantingDateCount() As Long
+    Dim n As Long
+    n = CLng(Val(GetSetting("Planting dates")))
+    If n < 1 Then n = 1
+    PlantingDateCount = n
+End Function
+
+Public Function PacketPrepName(ByVal splitNo As Long) As String
+    PacketPrepName = SHEET_PACKET_PREP & " " & splitNo
+End Function
+
+Public Function SplitForRow(ByVal fieldRow As Long) As Long
+    ' Reads the Field Map wizard's output block (cols T..X). Distinct planting
+    ' dates appear in order, so the Nth distinct date is split N.
+    ' Before the wizard has run there is one split and everything is in it.
+    Const OUT_COL As Long = 20
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_FIELD_MAP)
+    If ws Is Nothing Then
+        SplitForRow = 1
+        Exit Function
+    End If
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, OUT_COL + 1).End(xlUp).Row
+    If lastRow < 3 Then
+        SplitForRow = 1
+        Exit Function
+    End If
+
+    Dim dates As Object: Set dates = CreateObject("Scripting.Dictionary")
+    Dim r As Long, dop As String, n As Long
+    For r = 3 To lastRow
+        dop = S(ws.Cells(r, OUT_COL).Value)
+        If Len(dop) > 0 Then
+            If Not dates.Exists(dop) Then
+                n = n + 1
+                dates.Add dop, n
+            End If
+            If CLng(Val(ws.Cells(r, OUT_COL + 1).Value)) = fieldRow Then
+                SplitForRow = dates(dop)
+                Exit Function
+            End If
+        End If
+    Next r
+
+    ' Row not covered by any planting date — keep it visible in split 1
+    ' rather than dropping it silently from every Packet Prep tab.
+    SplitForRow = 1
+End Function
+
+Private Function CountByStage(ByVal stageName As String) As Long
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_REPLACEMENTS_AND_ERRORS)
+    If ws Is Nothing Then Exit Function
+
+    Dim lastRow As Long, r As Long, n As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    For r = 6 To lastRow
+        If LCase(S(ws.Cells(r, 1).Value)) = LCase(stageName) Then n = n + 1
+    Next r
+    CountByStage = n
+End Function
+
+
+'==============================================================================
+'  v2 — Home navigation
+'==============================================================================
+Public Sub btnBuildHomeNav()
+    Dim ws As Worksheet, home As Worksheet
+    Dim r As Long
+    Set home = GetSheet(SHEET_HOME)
+    If home Is Nothing Then Exit Sub
+
+    home.Range("I5:I200").Clear
+    home.Cells(4, 9).Value = "GO TO TAB"
+    home.Cells(4, 9).Font.Bold = True
+    home.Columns(9).ColumnWidth = 26
+
+    r = 5
+    For Each ws In ThisWorkbook.Worksheets
+        If ws.Name <> SHEET_HOME And ws.Visible = xlSheetVisible Then
+            home.Hyperlinks.Add Anchor:=home.Cells(r, 9), Address:="", _
+                SubAddress:="'" & ws.Name & "'!A1", TextToDisplay:=ws.Name
+            r = r + 1
+        End If
+    Next ws
+End Sub
+
+
+'==============================================================================
+'  v2 — Field Map wizard
+'  Re-runnable: clears its own output block so repeated runs do not stack.
+'==============================================================================
+Public Sub btnFieldMapWizard()
+    Const CLR_FORWARD As Long = 15792383   ' pale blue
+    Const CLR_REVERSE As Long = 15794160   ' pale green
+    Const OUT_COL As Long = 20             ' output block starts at column T
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_FIELD_MAP)
+    If ws Is Nothing Then Exit Sub
+
+    Dim nDates As Long
+    nDates = CLng(Val(InputBox("How many planting dates?", "Field Map", "2")))
+    If nDates < 1 Then Exit Sub
+
+    Dim qty As String
+    qty = InputBox("Seed quantity per plot:", "Field Map", _
+                   CStr(GetSetting("Seed qty per plot")))
+    SetSetting "Seed qty per plot", qty
+
+    Dim topRow As Long: topRow = 2
+    ws.Range(ws.Cells(topRow, OUT_COL), ws.Cells(topRow + 400, OUT_COL + 4)).Clear
+
+    ws.Cells(topRow, OUT_COL).Value = "Planting date"
+    ws.Cells(topRow, OUT_COL + 1).Value = "Row"
+    ws.Cells(topRow, OUT_COL + 2).Value = "Spike"
+    ws.Cells(topRow, OUT_COL + 3).Value = "Run"
+    ws.Cells(topRow, OUT_COL + 4).Value = "Seed qty/plot"
+    ws.Range(ws.Cells(topRow, OUT_COL), ws.Cells(topRow, OUT_COL + 4)).Font.Bold = True
+
+    Dim seen As Object: Set seen = CreateObject("Scripting.Dictionary")
+    Dim outR As Long: outR = topRow + 1
+    Dim i As Long, dop As String, rowsCsv As String
+    Dim parts As Variant, j As Long, rowNo As Long, dir As String
+
+    For i = 1 To nDates
+        dop = InputBox("Date of planting " & i & " (e.g. 25-Feb-2026):", "Field Map")
+        If Len(dop) = 0 Then Exit Sub
+        rowsCsv = InputBox("Rows for planting date " & i & " (comma separated):", _
+                           "Field Map")
+        If Len(rowsCsv) = 0 Then Exit Sub
+
+        parts = Split(rowsCsv, ",")
+        For j = LBound(parts) To UBound(parts)
+            rowNo = CLng(Val(Trim(parts(j))))
+            If rowNo > 0 Then
+                ' A row in two planting dates would print packets onto the
+                ' wrong split, so refuse rather than silently overwrite.
+                If seen.Exists(rowNo) Then
+                    MsgBox "Row " & rowNo & " is already assigned to planting " & _
+                           "date " & seen(rowNo) & ". Fix the row lists and " & _
+                           "run the wizard again.", vbCritical, "Overlapping rows"
+                    Exit Sub
+                End If
+                seen.Add rowNo, i
+
+                dir = RunDirection(rowNo)
+                ws.Cells(outR, OUT_COL).Value = dop
+                ws.Cells(outR, OUT_COL + 1).Value = rowNo
+                ws.Cells(outR, OUT_COL + 2).Value = SpikeForRow(rowNo)
+                ws.Cells(outR, OUT_COL + 3).Value = dir
+                ws.Cells(outR, OUT_COL + 4).Value = qty
+                If dir = "forward" Then
+                    ws.Range(ws.Cells(outR, OUT_COL), ws.Cells(outR, OUT_COL + 4)) _
+                      .Interior.Color = CLR_FORWARD
+                Else
+                    ws.Range(ws.Cells(outR, OUT_COL), ws.Cells(outR, OUT_COL + 4)) _
+                      .Interior.Color = CLR_REVERSE
+                End If
+                outR = outR + 1
+            End If
+        Next j
+    Next i
+
+    SetSetting "Planting dates", nDates
+    MsgBox nDates & " planting date(s) recorded, " & (outR - topRow - 1) & _
+           " rows assigned." & vbCrLf & vbCrLf & _
+           "Re-run Step 2 to rebuild Packet Prep with these splits.", _
+           vbInformation, "Field Map"
+End Sub
+
+
+'==============================================================================
+'  v2 — Fieldbook, built from Updated nursery site
+'==============================================================================
+Public Sub btnBuildFieldbook()
+    Dim src As Worksheet: Set src = GetSheet(SHEET_UPDATED_NURSERY_SITE)
+    If src Is Nothing Then
+        MsgBox "Tab '" & SHEET_UPDATED_NURSERY_SITE & "' not found.", vbCritical
+        Exit Sub
+    End If
+    If S(src.Cells(6, 1).Value) = "" Then
+        MsgBox "Paste the updated PRISM export into '" & _
+               SHEET_UPDATED_NURSERY_SITE & "' first " & _
+               "(headers row 5, data row 6+).", vbExclamation, "Nothing to build from"
+        src.Activate
+        Exit Sub
+    End If
+    BuildFieldbookV2 src
+End Sub
+
+Private Sub BuildFieldbookV2(ByVal src As Worksheet)
+    Const CLR_BLINE As Long = 13561798    ' pale green
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_FIELDBOOK)
+    If ws Is Nothing Then Exit Sub
+    ws.Cells.Clear
+
+    Dim cRange As Long, cRow As Long, cMat As Long, cSrc As Long
+    Dim cGen As Long, cCms As Long, cCom As Long
+    cRange = FindHeaderCol(src, "Range", 5)
+    cRow = FindHeaderCol(src, "Row", 5)
+    cMat = FindHeaderCol(src, "Material ID", 5)
+    cSrc = FindHeaderCol(src, "Source ID", 5)
+    cGen = FindHeaderCol(src, "Generation", 5)
+    cCms = FindHeaderCol(src, "CMS reaction", 5)
+    cCom = FindHeaderCol(src, "Comments", 5)
+    If cRange = 0 Or cRow = 0 Then
+        MsgBox "Could not find Range/Row columns in row 5 of '" & _
+               SHEET_UPDATED_NURSERY_SITE & "'.", vbCritical
+        Exit Sub
+    End If
+
+    ws.Cells(1, FB_COL_RANGE).Value = "Range"
+    ws.Cells(1, FB_COL_ROW).Value = "Row"
+    ws.Cells(1, FB_COL_MATERIAL_ID).Value = "Material ID"
+    ws.Cells(1, FB_COL_SOURCE_ID).Value = "Source ID"
+    ws.Cells(1, FB_COL_GEN).Value = "Gen"
+    ws.Cells(1, FB_COL_CMS).Value = "CMS"
+    ws.Cells(1, FB_COL_PLOT).Value = "Plot"
+    ws.Cells(1, FB_COL_COMMENTS).Value = "Comments"
+
+    Dim lastSrc As Long, r As Long, outR As Long
+    lastSrc = src.Cells(src.Rows.Count, cRange).End(xlUp).Row
+    outR = 2
+    For r = 6 To lastSrc
+        Dim rangeNo As Long, rowNo As Long
+        rangeNo = CLng(Val(src.Cells(r, cRange).Value))
+        rowNo = CLng(Val(src.Cells(r, cRow).Value))
+        ws.Cells(outR, FB_COL_RANGE).Value = rangeNo
+        ws.Cells(outR, FB_COL_ROW).Value = rowNo
+        ws.Cells(outR, FB_COL_MATERIAL_ID).Value = IIf(cMat > 0, src.Cells(r, cMat).Value, "")
+        ws.Cells(outR, FB_COL_SOURCE_ID).Value = IIf(cSrc > 0, src.Cells(r, cSrc).Value, "")
+        ws.Cells(outR, FB_COL_GEN).Value = IIf(cGen > 0, src.Cells(r, cGen).Value, "")
+        ws.Cells(outR, FB_COL_CMS).Value = IIf(cCms > 0, src.Cells(r, cCms).Value, "")
+        ws.Cells(outR, FB_COL_PLOT).Value = rangeNo & "_" & rowNo
+        ws.Cells(outR, FB_COL_COMMENTS).Value = IIf(cCom > 0, src.Cells(r, cCom).Value, "")
+        ' Scratch serpentine key, cleared once the sort is done.
+        ws.Cells(outR, FB_COL_COMMENTS + 2).Value = SerpentineKey(rangeNo, rowNo)
+        outR = outR + 1
+    Next r
+
+    Dim lastRow As Long: lastRow = outR - 1
+    If lastRow >= 3 Then
+        With ws.Sort
+            .SortFields.Clear
+            .SortFields.Add Key:=ws.Range(ws.Cells(2, FB_COL_RANGE), _
+                                          ws.Cells(lastRow, FB_COL_RANGE)), _
+                            Order:=xlAscending
+            .SortFields.Add Key:=ws.Range(ws.Cells(2, FB_COL_COMMENTS + 2), _
+                                          ws.Cells(lastRow, FB_COL_COMMENTS + 2)), _
+                            Order:=xlAscending
+            .SetRange ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, FB_COL_COMMENTS + 2))
+            .Header = xlNo
+            .Apply
+        End With
+    End If
+    ws.Columns(FB_COL_COMMENTS + 2).Clear
+
+    With ws.Range(ws.Cells(1, 1), ws.Cells(lastRow, FB_COL_COMMENTS)).Borders
+        .LineStyle = xlContinuous
+        .Weight = xlThin
+    End With
+    ws.Range(ws.Cells(1, 1), ws.Cells(1, FB_COL_COMMENTS)).Font.Bold = True
+    ws.Range(ws.Cells(1, 1), ws.Cells(1, FB_COL_COMMENTS)).HorizontalAlignment = xlCenter
+    ws.Columns(FB_COL_MATERIAL_ID).ColumnWidth = 22
+    ws.Columns(FB_COL_SOURCE_ID).ColumnWidth = 28
+    ws.Columns(FB_COL_COMMENTS).ColumnWidth = 30
+
+    If IsNurseryType("AB") Then
+        For r = 2 To lastRow
+            If UCase(S(ws.Cells(r, FB_COL_CMS).Value)) = "B" Then
+                ws.Range(ws.Cells(r, 1), ws.Cells(r, FB_COL_COMMENTS)) _
+                  .Interior.Color = CLR_BLINE
+            End If
+        Next r
+    End If
+
+    ws.Activate
+    ActiveWindow.FreezePanes = False
+    ws.Rows(2).Select
+    ActiveWindow.FreezePanes = True
+
+    With ws.PageSetup
+        .Orientation = xlLandscape
+        .PaperSize = xlPaperA4
+        .PrintTitleRows = "$1:$1"
+        .CenterFooter = "&P/&N"
+        .RightHeader = ThisWorkbook.Name
+        .Zoom = False
+        .FitToPagesWide = 1
+        .FitToPagesTall = False
+    End With
+
+    ws.Cells(1, 1).Select
+    MsgBox (lastRow - 1) & " plots written to the Fieldbook." & vbCrLf & vbCrLf & _
+           "Duplex short-edge is a printer setting — choose it in the print " & _
+           "dialog; Excel cannot set it from here.", vbInformation, "Fieldbook"
+End Sub
+
+
+'==============================================================================
+'  v2 — QR to split lookup
+'  The payload is plot,material,inbred,source,cms,gen,comments — the plot is
+'  the first field. The format is NOT changed here: already-printed labels
+'  must keep working.
+'==============================================================================
+Public Sub btnResolveSplitFromQR()
+    Const COL_QR As Long = 6
+    Const COL_SPLIT As Long = 9
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_REPLACEMENTS_AND_ERRORS)
+    If ws Is Nothing Then Exit Sub
+
+    Dim nDates As Long: nDates = PlantingDateCount()
+    Dim lastRow As Long, r As Long, unresolved As Long, resolved As Long
+    lastRow = ws.Cells(ws.Rows.Count, COL_QR).End(xlUp).Row
+
+    For r = 6 To lastRow
+        Dim payload As String, plot As String
+        payload = S(ws.Cells(r, COL_QR).Value)
+        If Len(payload) > 0 Then
+            plot = Trim(Split(payload, ",")(0))
+            Dim s As Long, found As Long: found = 0
+            For s = 1 To nDates
+                Dim pp As Worksheet: Set pp = GetSheet(PacketPrepName(s))
+                If Not pp Is Nothing Then
+                    Dim hit As Range
+                    Set hit = pp.Columns(4).Find(What:=plot, LookAt:=xlWhole)
+                    If Not hit Is Nothing Then
+                        found = s
+                        Exit For
+                    End If
+                End If
+            Next s
+            If found > 0 Then
+                ws.Cells(r, COL_SPLIT).Value = found
+                resolved = resolved + 1
+            Else
+                unresolved = unresolved + 1
+            End If
+        End If
+    Next r
+
+    If unresolved > 0 Then
+        MsgBox resolved & " scan(s) resolved." & vbCrLf & unresolved & _
+               " QR value(s) matched no plot in any Packet Prep tab — those " & _
+               "rows were left blank.", vbExclamation, "Unresolved scans"
+    Else
+        MsgBox resolved & " scan(s) resolved to a split.", vbInformation
+    End If
+End Sub
+
+
+'==============================================================================
+'  v2 — Date recording ordering buttons (AB only)
+'==============================================================================
+Public Sub btnRecordByRangeAndPullBags()
+    SortDateRecording False
+End Sub
+
+Public Sub btnRecord2RowsTogether()
+    SortDateRecording True
+End Sub
+
+Private Sub SortDateRecording(ByVal byBand As Boolean)
+    Const COL_GROUP As Long = 1
+    Const COL_RANGE As Long = 2
+    Const COL_ROW As Long = 3
+    Const COL_LAST As Long = 11
+    Const COL_KEY As Long = 13            ' scratch
+
+    Dim ws As Worksheet: Set ws = GetSheet(SHEET_DATE_RECORDING)
+    If ws Is Nothing Then Exit Sub
+
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, COL_RANGE).End(xlUp).Row
+    If lastRow < 2 Then
+        MsgBox "No data on '" & SHEET_DATE_RECORDING & "' yet.", vbInformation
+        Exit Sub
+    End If
+
+    Dim r As Long, rangeNo As Long, rowNo As Long
+    For r = 2 To lastRow
+        rangeNo = CLng(Val(ws.Cells(r, COL_RANGE).Value))
+        rowNo = CLng(Val(ws.Cells(r, COL_ROW).Value))
+        ws.Cells(r, COL_KEY).Value = SerpentineKey(rangeNo, rowNo)
+    Next r
+
+    With ws.Sort
+        .SortFields.Clear
+        If byBand Then
+            ' Walk each two-row band end to end before moving on.
+            .SortFields.Add Key:=ws.Range(ws.Cells(2, COL_GROUP), _
+                                          ws.Cells(lastRow, COL_GROUP)), _
+                            Order:=xlAscending
+        End If
+        .SortFields.Add Key:=ws.Range(ws.Cells(2, COL_RANGE), _
+                                      ws.Cells(lastRow, COL_RANGE)), _
+                        Order:=xlAscending
+        .SortFields.Add Key:=ws.Range(ws.Cells(2, COL_KEY), _
+                                      ws.Cells(lastRow, COL_KEY)), _
+                        Order:=xlAscending
+        .SetRange ws.Range(ws.Cells(2, 1), ws.Cells(lastRow, COL_KEY))
+        .Header = xlNo
+        .Apply
+    End With
+
+    ws.Columns(COL_KEY).Clear
+
+    If byBand Then
+        MsgBox "Ordered 2 rows together, snaking by range within each band.", _
+               vbInformation, "Date recording"
+    Else
+        MsgBox "Ordered by range, snaking through rows.", _
+               vbInformation, "Date recording"
+    End If
+End Sub
+
 
 Private Function CountRows(ByVal sheetName As String) As Long
     Dim ws As Worksheet: Set ws = GetSheet(sheetName)

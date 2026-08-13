@@ -34,7 +34,12 @@ Public Sub InstallAll()
     If removed > 0 Then Debug.Print "Removed " & removed & " orphan std module(s)."
 
     If InStr(wbName, "template") > 0 Then
+        ' SpecConstants must land before NurseryTemplate — it supplies the
+        ' SHEET_* and FB_COL_* constants that module now depends on.
+        ImportStdModule folder & "SpecConstants.bas", "SpecConstants", okCount, errCount
         ImportStdModule folder & "NurseryTemplate.bas", "NurseryTemplate", okCount, errCount
+        ImportStdModule folder & "FieldbookColouring.bas", "FieldbookColouring", okCount, errCount
+        CreateColourForm folder, okCount, errCount
         ReplaceComponent "ThisWorkbook", folder & "ThisWorkbook_Template.cls", okCount, errCount
         ReplaceSheetByName "Home", folder & "Sheet_Home_Template.cls", okCount, errCount
     ElseIf InStr(wbName, "hub") > 0 Then
@@ -119,6 +124,74 @@ Private Sub ReplaceSheetByName(ByVal sheetName As String, ByVal clsPath As Strin
         errCount = errCount + 1: Exit Sub
     End If
     ReplaceComponent ws.CodeName, clsPath, okCount, errCount
+End Sub
+
+'------------------------------------------------------------------------------
+'------------------------------------------------------------------------------
+'  Build the colouring UserForm.
+'
+'  A VBA .frm always pairs with a binary .frx — MSForms stores every control
+'  inside that blob — so the form cannot be checked into git as text and
+'  imported. Building it here keeps all source reviewable.
+'
+'  If Designer is unavailable on this Excel build, create the form once by
+'  hand in the VBE (label lblGroupBy, combo cmbGroupBy with Style
+'  fmStyleDropDownList, button cmdApply), Export it, commit the .frm/.frx
+'  pair, and swap the body of this sub for:
+'      ThisWorkbook.VBProject.VBComponents.Import folder & "frmSelectColumns.frm"
+'------------------------------------------------------------------------------
+Private Sub CreateColourForm(ByVal folder As String, _
+                             ByRef okCount As Long, ByRef errCount As Long)
+    Const vbext_ct_MSForm As Long = 3
+    Const FORM_NAME As String = "frmSelectColumns"
+
+    Dim codePath As String: codePath = folder & "frmSelectColumns.code.txt"
+    If Not FileExists(codePath) Then
+        Debug.Print "CreateColourForm: missing " & codePath
+        errCount = errCount + 1
+        Exit Sub
+    End If
+
+    On Error GoTo Failed
+
+    Dim vbp As Object: Set vbp = ThisWorkbook.VBProject
+
+    ' Idempotent: drop any prior copy before recreating.
+    On Error Resume Next
+    vbp.VBComponents.Remove vbp.VBComponents(FORM_NAME)
+    On Error GoTo Failed
+
+    Dim frm As Object
+    Set frm = vbp.VBComponents.Add(vbext_ct_MSForm)
+    frm.Name = FORM_NAME
+    frm.Properties("Caption") = "Fieldbook colouring"
+    frm.Properties("Width") = 360
+    frm.Properties("Height") = 260
+
+    Dim ctl As Object
+    Set ctl = frm.Designer.Controls.Add("Forms.Label.1", "lblGroupBy", True)
+    ctl.Caption = "Select column to look for repeating values:"
+    ctl.Left = 10: ctl.Top = 10: ctl.Width = 320
+
+    Set ctl = frm.Designer.Controls.Add("Forms.ComboBox.1", "cmbGroupBy", True)
+    ctl.Left = 10: ctl.Top = 32: ctl.Width = 320
+    ctl.Style = 2                       ' fmStyleDropDownList
+
+    Set ctl = frm.Designer.Controls.Add("Forms.CommandButton.1", "cmdApply", True)
+    ctl.Caption = "Apply Colouring"
+    ctl.Left = 10: ctl.Top = 140: ctl.Width = 140
+
+    frm.CodeModule.AddFromString ReadAllText(codePath)
+
+    okCount = okCount + 1
+    Debug.Print "Created UserForm " & FORM_NAME & " with 3 design-time controls."
+    Exit Sub
+
+Failed:
+    errCount = errCount + 1
+    Debug.Print "CreateColourForm FAILED: " & Err.Number & " " & Err.Description
+    Debug.Print "  If this is a Designer error, use the .frm/.frx fallback " & _
+                "described above this sub."
 End Sub
 
 '------------------------------------------------------------------------------

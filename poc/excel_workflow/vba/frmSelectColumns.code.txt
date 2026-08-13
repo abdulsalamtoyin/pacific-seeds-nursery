@@ -1,0 +1,108 @@
+Option Explicit
+
+Private Sub UserForm_Initialize()
+    Dim ws As Worksheet
+    Dim lastCol As Long
+    Dim i As Long
+    Dim chk As MSForms.CheckBox
+    Dim headerText As String
+    Dim topPos As Long
+
+    Set ws = ActiveSheet
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    ' Label placement (optional if you already placed it)
+    On Error Resume Next
+    lblGroupBy.Caption = "Select column to look for repeating values:"
+    On Error GoTo 0
+
+    ' Populate ComboBox with headers (row 1)
+    cmbGroupBy.Clear
+    For i = 1 To lastCol
+        headerText = Trim(CStr(ws.Cells(1, i).Value))
+        If headerText <> "" Then cmbGroupBy.AddItem headerText
+    Next i
+
+    ' Force a deliberate choice
+    cmbGroupBy.Value = ""
+
+    ' Remove old dynamic checkboxes if re-opening form
+    For i = Me.Controls.Count - 1 To 0 Step -1
+        If TypeName(Me.Controls(i)) = "CheckBox" Then
+            Me.Controls.Remove Me.Controls(i).Name
+        End If
+    Next i
+
+    ' Create checkboxes for columns to colour (show header text)
+    topPos = 70
+    For i = 1 To lastCol
+        headerText = Trim(CStr(ws.Cells(1, i).Value))
+        If headerText = "" Then headerText = "Column " & i
+        Set chk = Me.Controls.Add("Forms.CheckBox.1", "chkCol_" & i, True)
+        chk.Caption = headerText
+        chk.Tag = i
+        chk.Left = 10
+        chk.Top = topPos
+        chk.Width = 320
+        chk.Value = True
+        topPos = topPos + 20
+    Next i
+
+    ' Place the Apply button under the list
+    cmdApply.Left = 10
+    cmdApply.Top = topPos + 10
+    cmdApply.Width = 140
+
+    ' Resize the form so the button is visible
+    Me.Width = 360
+    Me.Height = cmdApply.Top + 70
+End Sub
+
+Private Sub cmdApply_Click()
+    Dim ws As Worksheet
+    Dim lastCol As Long
+    Dim i As Long
+    Dim ctl As Control
+
+    If cmbGroupBy.Value = "" Then
+        MsgBox "Please select the column to look for repeating values.", vbExclamation
+        Exit Sub
+    End If
+
+    Set ws = ActiveSheet
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+
+    ' Initialise collection safely
+    Set SelectedColumns = New Collection
+    TargetColumn = 0
+
+    ' Find TargetColumn by matching header text
+    For i = 1 To lastCol
+        If Trim(CStr(ws.Cells(1, i).Value)) = cmbGroupBy.Value Then
+            TargetColumn = i
+            Exit For
+        End If
+    Next i
+
+    If TargetColumn = 0 Then
+        MsgBox "Could not find the selected header in Row 1.", vbCritical
+        Exit Sub
+    End If
+
+    ' Read selected columns from checkboxes
+    For Each ctl In Me.Controls
+        If TypeName(ctl) = "CheckBox" Then
+            If ctl.Value = True Then
+                SelectedColumns.Add CLng(ctl.Tag)
+            End If
+        End If
+    Next ctl
+
+    If SelectedColumns.Count = 0 Then
+        MsgBox "Please tick at least one column to colour.", vbExclamation
+        Exit Sub
+    End If
+
+    Unload Me
+    ApplyColouring_VisibleOnly
+End Sub

@@ -76,6 +76,32 @@ end tell'''
         pass
 
 
+MACOS_UNSUPPORTED = """
+This installer cannot work on macOS.
+
+Excel's AppleScript dictionary has no 'VBProject' term, so the VBA project
+object model is unreachable from xlwings no matter what is enabled. Probed
+2026-08-13; the failure is:
+
+    AttributeError: Unknown property, element or command: 'VBProject'
+
+That is a missing API, not a permissions problem — enabling "Trust access to
+the VBA project object model" or macOS Automation will not change it.
+
+Use the bootstrap route instead (see excel_workflow/SETUP.md):
+
+  1. python -m excel_workflow.gen_spec_constants
+  2. python excel_workflow/build_workbooks.py
+  3. Open output/Nursery_Template.xlsm in Excel
+  4. Alt+F11, insert a module, paste vba/bootstrap.bas, run InstallAll
+  5. Point it at the vba/ folder when prompted, then save as .xlsm
+  6. python excel_workflow/extract_seed.py
+
+VBA running inside Excel *can* reach VBProject, which is why bootstrap works
+where this script cannot.
+"""
+
+
 def trust_check_message() -> str:
     return _red("\n⚠  Could not write VBA into the workbook.\n") + (
         "\nOn Mac, TWO separate permissions are needed:\n\n"
@@ -255,6 +281,13 @@ def find_home_sheet_codename(app, xlsx_path: Path) -> str | None:
 
 def main() -> int:
     print(_cyan("Pacific Seeds — Nursery VBA installer"))
+
+    # Fail honestly and immediately rather than walking the user through
+    # permission settings that cannot fix a missing AppleScript term.
+    if sys.platform == "darwin":
+        print(_red(MACOS_UNSUPPORTED))
+        return 2
+
     print(_dim("Source: ") + str(VBA_DIR))
     print(_dim("Output: ") + str(OUT_DIR))
 
