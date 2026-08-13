@@ -26,3 +26,4 @@ pystray>=0.19                  # system-tray icon menu
 # pyinstaller>=6.0             # only needed when building the Windows .exe
 # oletools>=0.60               # introspect vbaProject.bin (Excel workflow dev)
 # xlwings>=0.35                # Mac VBA installer dev (broken on Mac, kept for reference)
+pytest>=8.0                    # unit tests for nursery algorithms
