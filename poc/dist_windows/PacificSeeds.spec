@@ -103,6 +103,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=str(PROJECT / "pwa" / "ps-logo.svg")
+    # PyInstaller needs a real .ico — it cannot use the .svg. Drop one at
+    # pwa/ps-logo.ico and it is picked up automatically; until then the
+    # default Python icon is used rather than failing the build.
+    icon=str(PROJECT / "pwa" / "ps-logo.ico")
         if (PROJECT / "pwa" / "ps-logo.ico").exists() else None,
 )

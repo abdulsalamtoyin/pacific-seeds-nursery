@@ -226,7 +226,9 @@ def main() -> int:
     try:
         host = "127.0.0.1"
         port = _first_free_port([8765, 8766, 8767, 8000, 8080])
-        url = f"http://{host}:{port}/"
+        # /app is the workbook; / is only the how-it-works explainer, which is
+        # not what someone launching the installed app is after.
+        url = f"http://{host}:{port}/app"
         log.info("chosen url: %s", url)
 
         server = ServerThread(host, port)
