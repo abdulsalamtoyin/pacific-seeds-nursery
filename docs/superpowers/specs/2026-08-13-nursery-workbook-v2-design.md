@@ -217,19 +217,46 @@ The client's module is used essentially verbatim: `StartColouring`,
 (filtered) rows, groups by a chosen column, and applies an eight-colour muted
 pastel cycle.
 
-`frmSelectColumns` is authored as a checked-in `.frm` text file with three
-design-time controls — `lblGroupBy`, `cmbGroupBy` (fmStyleDropDownList),
-`cmdApply` — with the per-column checkboxes created at runtime in
-`UserForm_Initialize`, as the client's code does.
+`frmSelectColumns` carries three design-time controls — `lblGroupBy`,
+`cmbGroupBy` (fmStyleDropDownList), `cmdApply` — with the per-column checkboxes
+created at runtime in `UserForm_Initialize`, as the client's code does.
 
-Build path: `install_excel_macros.py` imports the `.frm` via the VBA object
-model on macOS Excel (confirmed present: Excel 16 + xlwings 0.35.3), then
-`extract_seed.py` re-extracts `seeds/Nursery_Template.vbaProject.bin`.
+#### Build path (revised after 2026-08-13 probe)
 
-**Fallback:** if `.frm` import proves unreliable on Mac Excel, replace the form
-with a worksheet control panel — a grouping dropdown plus tick cells on a
-helper sheet — driving the same `ApplyColouring_VisibleOnly` routine. The
-colouring logic is unchanged either way; only the picker differs.
+A probe established that **`VBProject` is not reachable from xlwings/appscript
+on macOS**. The failure is `AttributeError: Unknown property, element or
+command: 'VBProject'` — Excel's AppleScript dictionary has no such term, so
+this is a missing API, not a permissions block. `install_excel_macros.py`'s
+macOS path therefore cannot work as written, and its "trust settings" error
+message misattributes the cause.
+
+The working route is `bootstrap.bas`, which runs *inside* Excel where VBIDE
+extensibility is available: paste it into the VBE once, run `InstallAll`, and
+it imports every `.bas` from disk via
+`ThisWorkbook.VBProject.VBComponents.Import`. Seed mtimes confirm this is how
+the current `vbaProject.bin` was produced.
+
+The form is added the same way, preferring whichever of these verifies first:
+
+1. **All-text (preferred).** Extend `bootstrap.bas` to create the form with
+   `VBComponents.Add(3)` and populate it via `Designer.Controls.Add`. Keeps
+   every source artefact as reviewable text. Expected to work inside VBA on
+   Mac; must be verified before the rest of the colouring work depends on it.
+2. **Exported pair (fallback).** Create the form once by hand in the VBE,
+   `Export` it, commit the `.frm`+`.frx` pair, and have bootstrap import it
+   thereafter. Guaranteed to work, at the cost of one opaque binary in git.
+
+If neither holds, drop the form entirely for a worksheet control panel — a
+grouping dropdown plus tick cells on a helper sheet — driving the same
+`ApplyColouring_VisibleOnly` routine. The colouring logic is identical in all
+three cases; only the picker differs.
+
+#### Consequence for the whole Excel phase
+
+Every VBA change in Phase 1 reaches the workbook through the manual bootstrap
+step, not through an automated script. Plans must budget for that round-trip
+rather than assuming `install_excel_macros.py` works. Repairing or replacing
+that installer is tracked as its own task.
 
 ### Date recording (AB only)
 
