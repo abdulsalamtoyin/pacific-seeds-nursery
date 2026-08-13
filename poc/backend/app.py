@@ -299,11 +299,14 @@ def dashboard() -> str:
 async def admin_inspect(file: UploadFile = File(...)) -> dict:
     """Quick peek into an uploaded .xlsx: returns sheet names + best guess at
     the PRISM data sheet (one with a Range/Row/Source ID header)."""
+    import io
+
     from openpyxl import load_workbook
-    tmp = Path(tempfile.gettempdir()) / f"inspect_{file.filename}"
-    tmp.write_bytes(await file.read())
+    # Read from memory rather than a path built from file.filename — a crafted
+    # name like "../../etc/x" would otherwise escape the temp directory.
+    raw = await file.read()
     try:
-        wb = load_workbook(tmp, read_only=True, data_only=True)
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         sheets = []
         guess = None
         for name in wb.sheetnames:
@@ -332,9 +335,6 @@ async def admin_inspect(file: UploadFile = File(...)) -> dict:
         return {"sheets": sheets, "suggested": guess or (sheets[0]["name"] if sheets else None)}
     except Exception as e:
         raise HTTPException(400, f"Could not read file: {e}")
-    finally:
-        try: tmp.unlink()
-        except Exception: pass
 
 
 @app.post("/parse/prism")
@@ -371,10 +371,11 @@ async def parse_prism(file: UploadFile = File(...),
         sheet_name = file.filename or "csv"
     else:
         from openpyxl import load_workbook
-        tmp = Path(tempfile.gettempdir()) / f"prism_{os.getpid()}_{file.filename}"
-        tmp.write_bytes(raw)
+        # Read straight from memory. Writing the upload to a path built from
+        # file.filename would let a crafted name like "../../etc/x" escape the
+        # temp directory, and openpyxl is happy with a file-like object.
         try:
-            wb = load_workbook(tmp, read_only=True, data_only=True)
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
             sheet_name = sheet if sheet in wb.sheetnames else wb.sheetnames[0]
             ws = wb[sheet_name]
             grid = [[clean(c) for c in row]
@@ -383,11 +384,6 @@ async def parse_prism(file: UploadFile = File(...),
             raise
         except Exception as e:
             raise HTTPException(400, f"Could not read file: {e}")
-        finally:
-            try:
-                tmp.unlink()
-            except Exception:
-                pass
 
     # --- locate the header row -------------------------------------------
     header_idx = None
@@ -431,9 +427,13 @@ async def admin_init(
     """Step 1 — initialise a nursery from an uploaded PRISM export."""
     if not nursery_code.strip():
         raise HTTPException(400, "Nursery code required")
-    # Save the uploaded file to a temp path, then call the script function.
-    tmp = Path(tempfile.gettempdir()) / f"prism_{nursery_code}.xlsx"
-    tmp.write_bytes(await file.read())
+    # init_nursery takes a path, so this one has to hit disk. The name is
+    # generated rather than built from nursery_code — a value like
+    # "../../etc/x" would otherwise escape the temp directory.
+    with tempfile.NamedTemporaryFile(prefix="prism_", suffix=".xlsx",
+                                     delete=False) as handle:
+        handle.write(await file.read())
+        tmp = Path(handle.name)
     try:
         from nursery_init import init_nursery
         result = init_nursery(tmp, nursery_code, sheet)
