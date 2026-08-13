@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pacific Seeds — Nursery Workbook</title>
-<link rel="icon" href="ps-logo.svg">
+<link rel="icon" href="/static/ps-logo.svg">
 <style>
   :root {
     --navy: #092a40;
@@ -123,6 +123,9 @@
     border: 1px dashed var(--line); border-radius: 8px; padding: 26px;
     color: var(--muted); background: var(--grey);
   }
+  .empty.dragging {
+    border-color: var(--blue); background: var(--pale); color: var(--deep);
+  }
   .note {
     background: var(--warn); border: 1px solid #f0dcb4; border-radius: 6px;
     padding: 10px 12px; margin: 12px 0; color: #6a4c12;
@@ -145,7 +148,7 @@
 </head>
 <body>
   <header class="brand">
-    <img src="ps-logo-white.svg" alt="">
+    <img src="/static/ps-logo-white.svg" alt="">
     <b>Nursery Workbook</b>
   </header>
 
@@ -160,6 +163,8 @@
   <nav id="nav"></nav>
   <main id="main"></main>
 
-  <script type="module" src="app.js"></script>
+  <!-- Absolute /static paths: the page is served at /app, so relative URLs
+       would resolve to /app.js and miss the StaticFiles mount. -->
+  <script type="module" src="/static/app.js"></script>
 </body>
 </html>

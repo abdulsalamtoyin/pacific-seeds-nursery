@@ -337,6 +337,91 @@ async def admin_inspect(file: UploadFile = File(...)) -> dict:
         except Exception: pass
 
 
+@app.post("/parse/prism")
+async def parse_prism(file: UploadFile = File(...),
+                      sheet: str | None = Form(None)) -> dict:
+    """Read a PRISM export and hand back its rows as JSON.
+
+    Accepts .xlsx/.xlsm or .csv/.tsv. PRISM downloads arrive with the data on
+    a sheet called 'Sheet 1', and the header row sits at row 1 or row 5
+    depending on how it was saved, so both are found by scanning rather than
+    assumed.
+    """
+    import csv
+    import io
+    from datetime import date, datetime as dt
+
+    raw = await file.read()
+    name = (file.filename or "").lower()
+
+    def clean(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (dt, date)):
+            return v.strftime("%Y-%m-%d")
+        return str(v).strip()
+
+    # --- delimited text -------------------------------------------------
+    if name.endswith((".csv", ".tsv", ".txt")):
+        text = raw.decode("utf-8-sig", errors="replace")
+        first_line = text.split("\n")[0]
+        delim = "\t" if (name.endswith(".tsv") or "\t" in first_line) else ","
+        table = list(csv.reader(io.StringIO(text), delimiter=delim))
+        grid = [[clean(c) for c in row] for row in table]
+        sheet_name = file.filename or "csv"
+    else:
+        from openpyxl import load_workbook
+        tmp = Path(tempfile.gettempdir()) / f"prism_{os.getpid()}_{file.filename}"
+        tmp.write_bytes(raw)
+        try:
+            wb = load_workbook(tmp, read_only=True, data_only=True)
+            sheet_name = sheet if sheet in wb.sheetnames else wb.sheetnames[0]
+            ws = wb[sheet_name]
+            grid = [[clean(c) for c in row]
+                    for row in ws.iter_rows(values_only=True)]
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Could not read file: {e}")
+        finally:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+    # --- locate the header row -------------------------------------------
+    header_idx = None
+    for i, row in enumerate(grid[:15]):
+        lowered = [c.lower() for c in row]
+        if "range" in lowered and "row" in lowered:
+            header_idx = i
+            break
+    if header_idx is None:
+        raise HTTPException(
+            400,
+            "No header row with 'Range' and 'Row' found in the first 15 rows. "
+            "Check the right sheet was picked.")
+
+    headers = list(grid[header_idx])
+    rows: list[dict[str, str]] = []
+    for raw_row in grid[header_idx + 1:]:
+        if not any(c for c in raw_row):
+            continue
+        rec = {h: (raw_row[i] if i < len(raw_row) else "")
+               for i, h in enumerate(headers) if h}
+        # A row with neither Range nor Row is a footer or a stray note.
+        if not (rec.get("Range") or rec.get("Row")):
+            continue
+        rows.append(rec)
+
+    return {
+        "sheet": sheet_name,
+        "headers": [h for h in headers if h],
+        "rows": rows,
+        "count": len(rows),
+    }
+
+
 @app.post("/admin/init")
 async def admin_init(
     nursery_code: str = Form(...),

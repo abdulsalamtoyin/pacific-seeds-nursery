@@ -16,13 +16,6 @@ import {
 const $ = (sel) => document.querySelector(sel);
 const STORE_KEY = "ps-nursery-workbook";
 
-const PRISM_HEADERS = [
-  "Range", "Row", "Material ID", "Inbred Code", "Source ID", "CMS reaction",
-  "Generation", "Comments", "Pedigree", "Hybrid Code", "Trait Name",
-  "Plant #", "Loc Seq#", "SubSeq Flag", "Entry Book Project",
-  "Entry Book Name", "Entry #",
-];
-
 const REPLACEMENT_HEADERS = [
   "Stage", "Timestamp", "Plot", "Material ID", "Source ID",
   "QR", "Reason", "Technician", "Split no.", "Status",
@@ -119,28 +112,6 @@ function num(v) {
   return Number.isFinite(n) ? n : 0;
 }
 
-// Parse pasted PRISM data. Accepts tab- or comma-separated, with or without
-// a header line — the workbook expects headers at row 5 and data from row 6,
-// which pastes here as an optional first line.
-function parsePasted(text) {
-  const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
-  if (!lines.length) return [];
-  const split = (l) => (l.includes("\t") ? l.split("\t") : l.split(","));
-  let start = 0;
-  const first = split(lines[0]).map((c) => c.trim().toLowerCase());
-  if (first.includes("range") && first.includes("row")) start = 1;
-
-  const header = start === 1
-    ? split(lines[0]).map((c) => c.trim())
-    : PRISM_HEADERS;
-  return lines.slice(start).map((line) => {
-    const cells = split(line);
-    const rec = {};
-    header.forEach((h, i) => { rec[h] = (cells[i] ?? "").trim(); });
-    return rec;
-  }).filter((r) => num(r.Range) > 0 || num(r.Row) > 0);
-}
-
 function plotOf(r) {
   return `${num(r.Range)}_${num(r.Row)}`;
 }
@@ -223,12 +194,12 @@ VIEWS.Home = (main) => {
 
   const steps = [
     ["1. Initialise from PRISM export",
-      "Set the nursery code, type and file name, then paste the PRISM export " +
-      "into Nursery site.",
+      "Set the nursery code, type and file name, then import the PRISM " +
+      "export file into Nursery site.",
       () => { activeTab = "Nursery site"; render(); }],
     ["2. Generate all workbook tabs",
       "Builds Material Map, Field Map, Packet Prep and Nursery list from the " +
-      "pasted data.",
+      "imported data.",
       generateAll],
     ["3. Design Field Map",
       "Enter planting dates and rows. Spike numbers and forward/reverse runs " +
@@ -238,7 +209,7 @@ VIEWS.Home = (main) => {
       "One log for both, split by Stage.",
       () => { activeTab = "Replacements and Errors"; render(); }],
     ["5. Pull updated Nursery site from PRISM",
-      "Paste the refreshed export, then build the Fieldbook from it.",
+      "Import the refreshed export, then build the Fieldbook from it.",
       () => { activeTab = "Updated nursery site"; render(); }],
   ];
 
@@ -260,61 +231,119 @@ VIEWS.Home = (main) => {
     el("div", {}, "Replacements / errors logged"), el("div", {}, String(state.replacements.length))));
 };
 
-function pasteView(main, title, subtitle, key) {
+// Import the PRISM export straight from the downloaded file. Parsing happens
+// on the backend, which already has openpyxl — the browser would otherwise
+// need a spreadsheet library bundled just to read one sheet.
+async function importFile(file, key) {
+  const body = new FormData();
+  body.append("file", file);
+  const res = await fetch("/parse/prism", { method: "POST", body });
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`;
+    try {
+      detail = (await res.json()).detail || detail;
+    } catch { /* response was not JSON */ }
+    throw new Error(detail);
+  }
+  const data = await res.json();
+  if (!data.rows.length) {
+    throw new Error("The file parsed, but no data rows were found.");
+  }
+  state[key] = data.rows;
+  save();
+  return data;
+}
+
+function importView(main, title, subtitle, key) {
   main.append(...pageHead(title, subtitle));
   const rows = state[key];
-  const ta = el("textarea", {
-    class: "paste",
-    placeholder: "Paste the PRISM export here — tab or comma separated. " +
-      "A header line is detected automatically.",
-  });
-  main.append(ta);
-  main.append(el("div", { class: "btnrow" },
-    el("button", {
-      class: "action",
-      onclick: () => {
-        const parsed = parsePasted(ta.value);
-        if (!parsed.length) {
-          alert("Nothing parsed — check the data has Range and Row columns.");
-          return;
-        }
-        state[key] = parsed;
-        save();
-        alert(`${parsed.length} packets read.`);
+
+  const status = el("p", { class: "sub" }, "");
+  const picker = el("input", {
+    type: "file",
+    accept: ".xlsx,.xlsm,.csv,.tsv,.txt",
+    style: "display:none",
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      status.textContent = `Reading ${file.name}…`;
+      try {
+        const data = await importFile(file, key);
+        alert(`${data.count} packets read from “${data.sheet}”.`);
         render();
-      },
-    }, "Import pasted data"),
+      } catch (err) {
+        status.textContent = "";
+        alert(`Could not import ${file.name}.\n\n${err.message}`);
+      } finally {
+        e.target.value = "";      // allow re-picking the same file
+      }
+    },
+  });
+
+  const drop = el("div", {
+    class: "empty",
+    style: "text-align:center;cursor:pointer",
+    onclick: () => picker.click(),
+    ondragover: (e) => { e.preventDefault(); drop.classList.add("dragging"); },
+    ondragleave: () => drop.classList.remove("dragging"),
+    ondrop: async (e) => {
+      e.preventDefault();
+      drop.classList.remove("dragging");
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+      status.textContent = `Reading ${file.name}…`;
+      try {
+        const data = await importFile(file, key);
+        alert(`${data.count} packets read from “${data.sheet}”.`);
+        render();
+      } catch (err) {
+        status.textContent = "";
+        alert(`Could not import ${file.name}.\n\n${err.message}`);
+      }
+    },
+  },
+    el("b", {}, "Choose the PRISM export"),
+    el("div", { style: "margin-top:6px" },
+      "Click to browse, or drag the file here — .xlsx, .xlsm, .csv or .tsv. " +
+      "The header row is found automatically, whether it sits at row 1 or row 5."));
+
+  main.append(picker, drop, status);
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => picker.click() },
+      "Choose file…"),
     rows.length
       ? el("button", {
         class: "action ghost",
         onclick: () => { state[key] = []; save(); render(); },
-      }, "Clear")
+      }, "Clear imported data")
       : null));
 
   if (!rows.length) {
-    main.append(emptyState("No data yet."));
+    main.append(emptyState("No data imported yet."));
     return;
   }
   const cols = Object.keys(rows[0]).slice(0, 10);
   main.append(el("p", { class: "sub" },
-    `${rows.length} rows — showing the first 50.`));
+    `${rows.length} rows imported — showing the first 50.`));
   main.append(table(cols, rows.slice(0, 50).map((r) => cols.map((c) => r[c]))));
 }
 
-VIEWS["Nursery site"] = (main) => pasteView(main, "Nursery site",
-  "Paste the PRISM export. This is the source for every generated tab.",
+VIEWS["Nursery site"] = (main) => importView(main, "Nursery site",
+  "Import the PRISM export. This is the source for every generated tab.",
   "prism");
 
 VIEWS["Updated nursery site"] = (main) => {
-  pasteView(main, "Updated nursery site",
-    "Re-download from PRISM after the breeder applies replacements and errors.",
+  importView(main, "Updated nursery site",
+    "Import the re-downloaded PRISM file after the breeder applies " +
+    "replacements and errors.",
     "updatedPrism");
   main.append(el("div", { class: "btnrow" },
     el("button", {
       class: "action",
       onclick: () => {
         if (!state.updatedPrism.length) {
-          alert("Paste the updated PRISM export first.");
+          alert("Import the updated PRISM export first.");
           return;
         }
         activeTab = "Fieldbook";
@@ -659,7 +688,7 @@ VIEWS.Fieldbook = (main) => {
   const src = state.updatedPrism;
   if (!src.length) {
     main.append(emptyState(
-      "Paste the updated PRISM export into ‘Updated nursery site’ first."));
+      "Import the updated PRISM export on the ‘Updated nursery site’ tab first."));
     return;
   }
 
@@ -774,7 +803,7 @@ function viewMissing(main, name) {
 
 function generateAll() {
   if (!state.prism.length) {
-    alert("Paste the PRISM export into Nursery site first.");
+    alert("Import the PRISM export on the Nursery site tab first.");
     return;
   }
   save();
