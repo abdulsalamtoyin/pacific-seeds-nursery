@@ -145,54 +145,46 @@ def build_nursery_template() -> Path:
     prep_steps = [
         ("▶ 1. Initialise from PRISM export",
          "btnInitNursery",
-         "Reads the PRISM 'Nursery site' export sheet, creates all workflow tabs, "
-         "and sets up the workbook structure."),
-        ("▶ 2. Build Nursery list",
-         "btnBuildNurseryList",
-         "Picks all unique Source IDs from Nursery site, sorted A→Z. Adds Repeats "
-         "and Qty Required (1.4 × Repeats). Asks for qty per packet."),
-        ("▶ 3. Design Field Map",
-         "btnDesignFieldMap",
-         "Opens the Field Map tab; manually mark spike numbers, forward/reverse runs."),
-        ("▶ 4. Generate Packet Prep & QR labels",
-         "btnGeneratePacketPrep",
-         "Runs the 13-step Packet Prep workflow: sort, insert Plot/Spike/Rack/QR columns, "
-         "merge fields, filter rows, fill spike numbers."),
-        ("▶ 5. Sort packets for racking (LSD Radix)",
+         "Asks for the nursery code, validates that PRISM data is pasted into the "
+         "Nursery site tab, stamps Nursery data."),
+        ("▶ 2. Generate ALL workbook tabs",
+         "btnGenerateAllTabs",
+         "Builds every output tab from the pasted PRISM data: Map, Material Map, "
+         "Packet Prep (with QR text + colored digits), Nursery list, Fieldbook, "
+         "BC0 labels, Date recording, Pulling bags, TFMSA Spray plots, Hy Heights."),
+        ("▶ 3. Sort packets for racking (LSD Radix)",
          "btnSortForRacking",
-         "Performs the Least-Significant-Digit Radix sort so packets stack in rack order."),
+         "Re-sorts Packet Prep by Rack Order ↑ then Spike ↑ — the physical "
+         "pick-up order for racking."),
     ]
 
     field_steps = [
-        ("▶ 6. Record replacement (Packeting/Planting)",
+        ("▶ 4. Record replacement (Packeting/Planting)",
          "btnAddReplacement",
          "Opens a dialog to capture a replacement event with stage dropdown."),
-        ("▶ 7. Record planting error",
+        ("▶ 5. Record planting error",
          "btnAddPlantingError",
-         "Logs a planting error in the Replacements and errors tab."),
-        ("▶ 8. Spray track + date recording",
+         "Logs a planting error in the Replacements done tab."),
+        ("▶ 6. Spray track + date recording",
          "btnRecordSpray",
          "Adds a TFMSA / IMI / HPPD spray application with date."),
-        ("▶ 9. AB bag pulling",
+        ("▶ 7. AB bag pulling",
          "btnRecordABPull",
          "Records pulled bags with date and count."),
     ]
 
     post_steps = [
-        ("▶ 10. Pull updated Nursery site from PRISM",
+        ("▶ 8. Pull updated Nursery site from PRISM",
          "btnImportUpdated",
-         "Imports the refreshed PRISM export into the 'Updated nursery site' tab."),
-        ("▶ 11. Generate Fieldbook",
-         "btnGenerateFieldbook",
-         "Runs the Fieldbook template VBA: reorders columns, adds Bagging Info/Comments, "
-         "serpentine sort, sets landscape print layout."),
-        ("▶ 12. Refresh dashboard",
+         "After Breeder updates PRISM with replacements + errors, paste the "
+         "refreshed Nursery site export and re-run Step 2 to regenerate every tab."),
+        ("▶ 9. Refresh dashboard",
          "btnRefreshDashboard",
-         "Updates the local stats panel below."),
-        ("▶ 13. Push to Hub",
+         "Recalculates the live stats panel below."),
+        ("▶ 10. Push to Hub",
          "btnPushToHub",
-         "Writes this nursery's summary to the shared registry.csv so the Nursery Hub "
-         "workbook sees it on its dashboard."),
+         "Writes this nursery's summary to the shared registry.csv so the Nursery "
+         "Hub workbook sees it on its dashboard."),
     ]
 
     def render_step_block(start_row: int, steps: list, color: str) -> int:
@@ -245,11 +237,11 @@ def build_nursery_template() -> Path:
         ("Total packets", "DASH_TotalPackets", "=IFERROR(COUNTA('Nursery site'!A:A)-1,0)"),
         ("Unique source IDs", "DASH_UniqueSources", "=IFERROR(COUNTA('Nursery list'!A:A)-1,0)"),
         ("Replacements logged", "DASH_Replacements",
-         "=IFERROR(COUNTIF('Replacements and errors'!D:D,\"replacement\"),0)"),
+         "=IFERROR(COUNTA('Replacements done'!A:A)-3,0)"),
         ("Planting errors logged", "DASH_PlantingErrors",
-         "=IFERROR(COUNTIF('Replacements and errors'!D:D,\"planting_error\"),0)"),
+         "=IFERROR(COUNTA('Planting error noted'!A:A)-3,0)"),
         ("Spray events", "DASH_SprayEvents",
-         "=IFERROR(COUNTA('Additionals'!A:A)-2,0)"),
+         "=IFERROR(COUNTA('TFMSA Spray plots'!A:A)-3,0)"),
         ("Last synced to Hub", "DASH_LastSync", "Never"),
     ]
     for i, (label, name, formula) in enumerate(metrics):
@@ -303,35 +295,72 @@ def build_nursery_template() -> Path:
     settings.column_dimensions["B"].width = 42
     settings.column_dimensions["C"].width = 55
 
-    # ---- Data tabs (the 12 workflow tabs) ----
+    # ---- Data tabs (17 — sample-faithful: matches the .app workbook output) ----
     workflow_tabs = [
-        ("Nursery site", "Paste the PRISM export here (or click Step 1).",
-         ["Range", "Row", "Material ID", "Source ID", "CMS reaction", "Generation",
-          "Inbred Code", "Pedigree", "Hybrid Code", "Trait Name", "Plant #",
-          "Loc Seq#", "SubSeq Flag", "Entry Book Project", "Entry Book Name", "Entry #"]),
-        ("Field Map", "Manual grid. Mark range/row numbers and spike zones here.", []),
-        ("Material Map", "Paste PRISM Material Map here.", []),
+        ("Nursery site",
+         "Paste the PRISM export here (headers row 5, data row 6+). Step 2 reads this.",
+         ["Range", "Row", "Material ID", "Inbred Code", "Source ID", "CMS reaction",
+          "Generation", "Comments", "Pedigree", "Hybrid Code", "Trait Name",
+          "Plant #", "Loc Seq#", "SubSeq Flag", "Entry Book Project",
+          "Entry Book Name", "Entry #"]),
         ("Nursery data",
-         "Header info — nursery name, season, breeder. Populated from Settings.", []),
-        ("Nursery list", "Auto-built by Step 2 from Nursery site.",
-         ["Source ID", "Repeats", "Qty Required", "Inbred Code", "Hybrid Code",
-          "Treatment", "Notes"]),
-        ("Packet prep", "Auto-built by Step 4.",
-         ["QR payload", "Plot", "Range", "Row", "Spike", "Rack Order",
-          "Material ID", "Source ID", "Generation", "CMS reaction", "Comments"]),
-        ("Replacements and errors", "Log of all replacements and planting errors.",
-         ["Captured At", "Tech", "Plot", "Type", "Stage", "Original Source ID",
-          "Replaced With", "Severity", "Note", "Status"]),
-        ("Updated nursery site", "Drop the refreshed PRISM export here for step 10.", []),
-        ("Fieldbook", "Auto-built by Step 11 — print-ready.",
+         "Header info — nursery code, season, breeder. Stamped by Step 1.", []),
+        ("Map",
+         "Auto-built by Step 2. 2D grid: ranges down, field rows across, Hybrid Code per cell.",
+         []),
+        ("Material Map",
+         "Auto-built by Step 2. Same grid as Map but with Material ID per cell.", []),
+        ("Packet Prep",
+         "Auto-built by Step 2. 25 cols with QR CODE text + colored digit columns. "
+         "Feed this tab to your barcode printer machine.",
+         ["QR CODE", "Range", "Row", "Plot", "SPIKE#", "RACK ORDER",
+          "Thousands/Black", "Hundreds/Red", "Tens/Green", "Ones/Blue",
+          "Material ID", "Inbred Code", "Source ID", "CMS reaction",
+          "Generation", "Comments", "Pedigree", "Hybrid Code",
+          "Trait Name", "Plant #", "Loc Seq#", "SubSeq Flag",
+          "Entry Book Project", "Entry Book Name", "Entry #"]),
+        ("Nursery list",
+         "Auto-built by Step 2 — Source ID (Hybrid Code) grouped by count + qty.",
+         ["", "", "Source ID (Hybrid Code)", "Repeats", "Qty Required",
+          "Inbred Code", "Hybrid Code", "Notes"]),
+        ("Fieldbook",
+         "Auto-built by Step 2 — print-ready field reference.",
          ["Range", "Row", "R_R", "Crossed bags", "Bagging Info", "Material ID",
           "Source ID", "Gen", "CMS", "Comments"]),
-        ("Operations", "Growth stage tracker, colour-coded.",
-         ["Stage", "Plan", "Done date", "Comments"]),
-        ("Comments", "Free-form team notes.", ["Date", "Tech", "Topic", "Comment"]),
-        ("Additionals", "TFMSA spray, AB date recording, AB bag pulling.",
-         ["Captured At", "Tech", "Plot", "Operation", "Product / Event",
-          "Date", "Count", "Note"]),
+        ("Replacements done",
+         "Log replacements here. Once Breeder updates PRISM, rename this tab.",
+         ["Qrcode", "Replacement", "Status", "Notes"]),
+        ("Planting error noted",
+         "Log planting errors here. Once Breeder updates PRISM, rename this tab.",
+         ["Plot", "Range", "Row", "Description", "Severity", "Date noticed", "Status"]),
+        ("BC0 labels",
+         "Auto-built by Step 2 — BC* generations only (TFMSA / Pollen tracking).",
+         ["Range", "Row", "Crossed bags", "TFMSA", "Pollen", "TFMSA/Pollen",
+          "Nursery Name", "Bagging Info", "Material ID", "Source ID", "Gen",
+          "CMS", "Comments"]),
+        ("Date recording",
+         "Auto-built by Step 2 — BC* and Fn packets for date tracking.",
+         ["Range", "Row", "Plot", "1", "2",
+          "Material ID", "Source ID", "Gen", "CMS", "Comments"]),
+        ("Pulling bags",
+         "Auto-built by Step 2 — same population as Date recording, bag-pulling tracker.",
+         ["Range", "Row", "Plot", "1", "2",
+          "Material ID", "Source ID", "Gen", "CMS", "Comments"]),
+        ("Operations",
+         "Growth-stage tracker — fill in plan/comments per stage.",
+         ["Stage", "Plan", "Reminders", "Comments"]),
+        ("Comments",
+         "Free-form team notes.",
+         ["Date", "Tech", "Topic", "Comment"]),
+        ("BC0 TFMSA record",
+         "Day 7 / Day 10 / Day 13 TFMSA spray date observations.",
+         []),
+        ("TFMSA Spray plots",
+         "Auto-built by Step 2 — BC* plots that get TFMSA.",
+         ["Range", "Row", "Source ID", "CMS", "Gen"]),
+        ("Hy Heights",
+         "Auto-built by Step 2 — F1 hybrids height tracker.",
+         ["Range", "Row", "Height in CM", "Material ID", "Source ID", "Gen", "CMS"]),
     ]
 
     for name, subtitle, headers in workflow_tabs:
@@ -374,19 +403,11 @@ def build_nursery_template() -> Path:
                 wrap_text=True, vertical="top")
         ops.row_dimensions[i].height = 40
 
-    # Set up data validation on Replacements: Type column
-    rep = wb["Replacements and errors"]
-    dv_type = DataValidation(type="list",
-        formula1='"replacement,planting_error,spray,ab_pull,note"', allow_blank=True)
-    dv_type.add(f"D6:D5000")
-    rep.add_data_validation(dv_type)
-    dv_stage = DataValidation(type="list",
-        formula1='"Packeting,Planting"', allow_blank=True)
-    dv_stage.add(f"E6:E5000")
-    rep.add_data_validation(dv_stage)
+    # Data validation on Replacements done: Status column (col C)
+    rep = wb["Replacements done"]
     dv_status = DataValidation(type="list",
-        formula1='"Open,In PRISM,Closed"', allow_blank=True)
-    dv_status.add(f"J6:J5000")
+        formula1='"Open,In PRISM,Updated,Closed"', allow_blank=True)
+    dv_status.add("C6:C5000")
     rep.add_data_validation(dv_status)
 
     # Re-order tabs: Home first
