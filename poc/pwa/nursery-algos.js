@@ -79,6 +79,49 @@ export function assignSplits(dopRows) {
   return splits;
 }
 
+// ----------------------------------------------------------- packet prep
+//
+// Ported from PP2026_Run in the client's "Packetprinting VBA (advanced one)"
+// document, and mirrored by packet_prep_order() / rack_digits() in
+// nursery_algos.py.
+//
+// Packets come off the rack in the order the planter needs them, so the sheet
+// is ordered before the rack numbers are handed out: row descending, range
+// descending on a forward row and ascending on a reverse one, then grouped by
+// spike with spike 1 first, then numbered 1..n within each spike.
+
+/** Order [range, row] plots the way packets are racked. */
+export function packetPrepOrder(plots) {
+  const serpentineKey = ([rangeNo, rowNo]) => {
+    // Forward rows are 1,2,5,6,9,10... — the same rows runDirection() calls
+    // forward, expressed as the VBA writes it.
+    const forward = rowNo % 4 === 1 || rowNo % 4 === 2;
+    return [-rowNo, forward ? -rangeNo : rangeNo];
+  };
+
+  const ordered = [...plots].sort((a, b) => {
+    const ka = serpentineKey(a);
+    const kb = serpentineKey(b);
+    return ka[0] - kb[0] || ka[1] - kb[1];
+  });
+  // Array.prototype.sort is stable, so the serpentine order survives inside
+  // each spike.
+  return ordered.sort((a, b) => spikeForRow(a[1]) - spikeForRow(b[1]));
+}
+
+/**
+ * Split a rack order into one column per digit: 7 -> ["0","0","0","7"].
+ *
+ * Four columns by default, as the document shows. A value too big for the
+ * width widens rather than being truncated — a clipped rack number would
+ * misfeed the rack silently.
+ */
+export function rackDigits(value, width = 4) {
+  const text = String(value ?? "").trim();
+  if (!/^\d+$/.test(text)) return Array(width).fill("");
+  return text.padStart(Math.max(width, text.length), "0").split("");
+}
+
 // ----------------------------------------------------------------- dates
 //
 // Ported from GenerateS1S2TrendAnalysis in the client's appendix VBA, and

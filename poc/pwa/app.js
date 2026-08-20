@@ -11,11 +11,11 @@ import { SPEC, tabsFor } from "./nursery-spec.js";
 import {
   spikeForRow, runDirection, bandForRow, parityForRow,
   serpentineByRange, serpentineTwoRowBands, assignSplits,
-  assignMonth, trendCounts,
+  assignMonth, trendCounts, packetPrepOrder, rackDigits,
 } from "./nursery-algos.js";
 import * as store from "./store.js";
 import { grid } from "./grid.js";
-import { padRack, radixWidth, todayISO } from "./grid-core.js";
+import { todayISO } from "./grid-core.js";
 import {
   download, exportBartender, exportEachTab, exportGrid, exportWorkbook,
 } from "./exporter.js";
@@ -991,45 +991,56 @@ VIEWS["Packet Prep"] = (main, tabName) => {
 
   const packets = state.prism.filter((r) => splitForRow(num(r.Row)) === splitNo);
 
-  // Rack order counts within a spike, so the packets come off the rack in the
-  // order they are planted. Every value in the tab is padded to one width —
-  // a scanner sorting "10" before "9" would misfeed the whole rack — and the
-  // width steps to four digits once any spike passes 999.
-  const perSpike = new Map();
-  for (const r of packets) {
-    const spike = spikeForRow(num(r.Row));
-    perSpike.set(spike, (perSpike.get(spike) ?? 0) + 1);
-  }
-  const width = radixWidth(Math.max(0, ...perSpike.values()));
+  // Packets must come off the rack in the order the planter needs them, so
+  // the sheet is ordered before the rack numbers are handed out: rows
+  // descending, range descending on a forward row and ascending on a reverse
+  // one, then grouped with spike 1 ahead of spike 2. Ported from PP2026_Run.
+  const byPlot = new Map(
+    packets.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  const ordered = packetPrepOrder(
+    packets.map((r) => [num(r.Range), num(r.Row)]));
 
+  // Rack order then counts 1..n within each spike.
   const seen = new Map();
-  const rows = packets.map((r) => {
-    const rng = num(r.Range);
-    const row = num(r.Row);
+  const numbered = ordered.map(([rng, row]) => {
     const spike = spikeForRow(row);
     const seq = (seen.get(spike) ?? 0) + 1;
     seen.set(spike, seq);
+    return { rng, row, spike, seq, record: byPlot.get(`${rng}:${row}`) ?? {} };
+  });
+
+  // Four digit columns, as the document shows: 7 -> 0 | 0 | 0 | 7. Widened
+  // only if a spike ever runs past 9999, so every value stays the same width.
+  const digitWidth = Math.max(4,
+    ...numbered.map((p) => String(p.seq).length));
+  const digitKeys = Array.from({ length: digitWidth }, (_, i) => `D${i + 1}`);
+
+  const rows = numbered.map(({ rng, row, spike, seq, record }) => {
+    const digits = rackDigits(seq, digitWidth);
     return {
       "Nursery name": state.code,
-      "QR CODE": qrText(r),
+      "QR CODE": qrText(record),
       Range: rng,
       Row: row,
-      Plot: plotOf(r),
+      Plot: `${rng}_${row}`,
       "SPIKE#": spike,
-      "RACK ORDER": padRack(seq, width),
+      "RACK ORDER": seq,
+      ...Object.fromEntries(digitKeys.map((k, i) => [k, digits[i] ?? ""])),
       "Split no.": splitNo,
-      "Material ID": r["Material ID"] ?? "",
-      "Inbred Code": r["Inbred Code"] ?? "",
-      "Hybrid Code": r["Hybrid Code"] ?? "",
-      "Source ID": r["Source ID"] ?? "",
-      "CMS reaction": r["CMS reaction"] ?? "",
-      Generation: r.Generation ?? "",
+      "Material ID": record["Material ID"] ?? "",
+      "Inbred Code": record["Inbred Code"] ?? "",
+      "Hybrid Code": record["Hybrid Code"] ?? "",
+      "Source ID": record["Source ID"] ?? "",
+      "CMS reaction": record["CMS reaction"] ?? "",
+      Generation: record.Generation ?? "",
     };
   });
 
+  const spikeCounts = [...seen.entries()].sort((a, b) => a[0] - b[0]);
   main.append(el("p", { class: "sub" },
-    `${rows.length} packets in this split, rack order padded to ${width} ` +
-    `digits across ${perSpike.size} spike(s).`));
+    `${rows.length} packets in this split, racked in planting order. ` +
+    spikeCounts.map(([s, n]) => `Spike ${s}: ${n}`).join(", ") +
+    `. Rack order split into ${digitWidth} digit columns.`));
 
   const node = grid({
     id: tabName,
@@ -1040,7 +1051,11 @@ VIEWS["Packet Prep"] = (main, tabName) => {
       { key: "Row", type: "number" },
       { key: "Plot", type: "text" },
       { key: "SPIKE#", type: "number" },
-      { key: "RACK ORDER", type: "text" },
+      { key: "RACK ORDER", type: "number" },
+      // One column per digit, for the label template.
+      ...digitKeys.map((k, i) => ({
+        key: k, label: `Digit ${i + 1}`, type: "text",
+      })),
       { key: "Split no.", type: "number" },
       { key: "Material ID", type: "text" },
       { key: "Inbred Code", type: "text" },

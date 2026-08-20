@@ -79,6 +79,50 @@ def assign_splits(dop_rows) -> dict[int, int]:
     return splits
 
 
+# -------------------------------------------------------------- packet prep
+#
+# Ported from PP2026_Run in the client's "Packetprinting VBA (advanced one)"
+# document, which supersedes the rack-order note in the earlier change list.
+#
+# Packets come off the rack in the order the planter needs them, so the sheet
+# is ordered before the rack numbers are handed out:
+#
+#   step 8  row descending; within a row the range descends on a forward row
+#           and ascends on a reverse row
+#   step 9  then grouped by spike, spike 1 before spike 2, keeping that order
+#   step 10 rack order counts 1..n within each spike
+#
+# The spike rule in step 7 (row mod 4 -> 0,1 = spike 1; 2,3 = spike 2) is the
+# same assignment SPIKE_CYCLE already makes, so spike_for_row is reused.
+
+
+def packet_prep_order(plots) -> list[tuple[int, int]]:
+    """Order ``(range, row)`` plots the way packets are racked."""
+    def serpentine_key(plot):
+        range_no, row_no = plot
+        # Forward rows are 1,2,5,6,9,10... — the same rows run_direction()
+        # calls forward, expressed as the VBA writes it.
+        forward = row_no % 4 in (1, 2)
+        return (-row_no, -range_no if forward else range_no)
+
+    ordered = sorted(plots, key=serpentine_key)
+    # Stable, so the serpentine order survives inside each spike.
+    return sorted(ordered, key=lambda plot: spike_for_row(plot[1]))
+
+
+def rack_digits(value, width: int = 4) -> list[str]:
+    """Split a rack order into one column per digit: 7 -> ['0','0','0','7'].
+
+    Four columns by default, as the document shows. A value too big for the
+    width widens rather than being truncated — a clipped rack number would
+    misfeed the rack silently.
+    """
+    text = str(value if value not in (None, "") else "").strip()
+    if not text.isdigit():
+        return [""] * width
+    return list(text.zfill(max(width, len(text))))
+
+
 # --------------------------------------------------------------------- dates
 #
 # Ported from GenerateS1S2TrendAnalysis in the client's appendix VBA.

@@ -9,7 +9,9 @@ import pytest
 from excel_workflow.nursery_algos import (
     assign_splits,
     band_for_row,
+    packet_prep_order,
     parity_for_row,
+    rack_digits,
     run_direction,
     serpentine_by_range,
     serpentine_two_row_bands,
@@ -108,3 +110,81 @@ def test_assign_splits_rejects_a_row_in_two_planting_dates():
 def test_assign_splits_rejects_empty_input():
     with pytest.raises(ValueError, match="at least one planting date"):
         assign_splits([])
+
+
+# --- Packet printing (advanced): PP2026_Run --------------------------------
+#
+# From "Packetprinting VBA (advanced one).docx". Packets have to come off the
+# rack in the order the planter needs them, so the sheet is ordered before the
+# rack numbers are handed out.
+
+
+def test_spike_matches_the_documents_row_mod_4_rule():
+    """Step 7 states the spikes as row lists; they must agree with our cycle."""
+    spike1 = [r for r in range(1, 17) if spike_for_row(r) == 1]
+    spike2 = [r for r in range(1, 17) if spike_for_row(r) == 2]
+    assert spike1 == [1, 4, 5, 8, 9, 12, 13, 16]
+    assert spike2 == [2, 3, 6, 7, 10, 11, 14, 15]
+
+
+def test_forward_rows_are_the_ones_the_document_lists():
+    """Step 8 calls 1,2,5,6,9,10... forward. run_direction must agree."""
+    forward = [r for r in range(1, 17) if run_direction(r) == "forward"]
+    assert forward == [1, 2, 5, 6, 9, 10, 13, 14]
+
+
+def test_packet_order_groups_spike_one_before_spike_two():
+    plots = [(r, w) for w in range(1, 5) for r in range(1, 4)]
+    order = packet_prep_order(plots)
+    spikes = [spike_for_row(row) for _, row in order]
+    assert spikes == sorted(spikes), "spike 1 must come out before spike 2"
+
+
+def test_rows_descend_within_a_spike():
+    plots = [(1, w) for w in (1, 4, 5, 8)]        # all spike 1
+    assert [row for _, row in packet_prep_order(plots)] == [8, 5, 4, 1]
+
+
+def test_range_descends_on_a_forward_row():
+    """Row 1 is forward, so its ranges come out high to low."""
+    plots = [(1, 1), (2, 1), (3, 1)]
+    assert packet_prep_order(plots) == [(3, 1), (2, 1), (1, 1)]
+
+
+def test_range_ascends_on_a_reverse_row():
+    """Row 3 is reverse, so its ranges come out low to high."""
+    plots = [(3, 3), (1, 3), (2, 3)]
+    assert packet_prep_order(plots) == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_the_snake_turns_between_rows():
+    """Forward row 5 descends, reverse row 4 ascends — the serpentine."""
+    plots = [(1, 5), (2, 5), (1, 4), (2, 4)]
+    order = packet_prep_order(plots)
+    # Both rows are spike 1; row 5 comes first because rows descend.
+    assert order == [(2, 5), (1, 5), (1, 4), (2, 4)]
+
+
+def test_every_plot_survives_the_ordering():
+    plots = [(r, w) for w in range(1, 9) for r in range(1, 5)]
+    assert sorted(packet_prep_order(plots)) == sorted(plots)
+
+
+@pytest.mark.parametrize("value,expected", [
+    (7, ["0", "0", "0", "7"]),
+    (85, ["0", "0", "8", "5"]),
+    (326, ["0", "3", "2", "6"]),
+    (1458, ["1", "4", "5", "8"]),
+])
+def test_rack_order_splits_into_the_documents_four_digits(value, expected):
+    assert rack_digits(value) == expected
+
+
+def test_a_rack_order_beyond_four_digits_widens_rather_than_truncating():
+    """Clipping a rack number would misfeed the rack with no sign of why."""
+    assert rack_digits(12345) == ["1", "2", "3", "4", "5"]
+
+
+@pytest.mark.parametrize("value", ["", None, "n/a"])
+def test_a_missing_rack_order_gives_blank_digits(value):
+    assert rack_digits(value) == ["", "", "", ""]

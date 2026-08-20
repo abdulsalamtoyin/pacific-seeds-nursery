@@ -30,7 +30,7 @@ DRIVER = """
 import {{
   spikeForRow, runDirection, bandForRow, parityForRow,
   serpentineByRange, serpentineTwoRowBands, assignSplits,
-  assignMonth, trendCounts,
+  assignMonth, trendCounts, packetPrepOrder, rackDigits,
 }} from {module!r};
 
 const rows = {rows};
@@ -53,6 +53,8 @@ console.log(JSON.stringify({{
   months: dayValues.map((d) => assignMonth(d, 28, 7, 2026)),
   monthsWrapping: dayValues.map((d) => assignMonth(d, 20, 12, 2026)),
   trend: trendCounts(trendRows, ["S 1", "S 2"], 28, 7, 2026),
+  packetOrder: packetPrepOrder(plots),
+  digits: [7, 85, 326, 1458, 0, 12345, ""].map((v) => rackDigits(v)),
 }}));
 """
 
@@ -139,6 +141,17 @@ def test_month_assignment_year_wrap_matches_python(js_output):
     expected = [py.assign_month(d, 20, 12, 2026) for d in DAY_VALUES]
     got = [tuple(m) if m else None for m in js_output["monthsWrapping"]]
     assert got == expected
+
+
+def test_packet_prep_order_matches_python(js_output):
+    """The order packets are racked in — printed labels depend on it."""
+    expected = [list(p) for p in py.packet_prep_order(PLOTS)]
+    assert js_output["packetOrder"] == expected
+
+
+def test_rack_digits_match_python(js_output):
+    expected = [py.rack_digits(v) for v in [7, 85, 326, 1458, 0, 12345, ""]]
+    assert js_output["digits"] == expected
 
 
 def test_trend_counts_match_python(js_output):

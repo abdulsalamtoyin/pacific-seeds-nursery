@@ -298,29 +298,3 @@ def test_defaulted_dates_sort_and_filter_with_the_rest(tmp_path):
     """)
     # The blank row sorts into today's position, and is findable as today.
     assert out == {"sorted": ["a", "b", "c"], "filtered": ["b"]}
-
-
-# ------------------------------------------------------------------ rack order
-
-
-@pytest.mark.parametrize("count,width", [
-    (1, 3), (999, 3), (1000, 4), (1001, 4), (9999, 4),
-])
-def test_rack_order_widens_past_999(tmp_path, count, width):
-    out = run_js(tmp_path, f"""
-      console.log(JSON.stringify({{ w: core.radixWidth({count}) }}));
-    """)
-    assert out == {"w": width}
-
-
-def test_rack_order_pads_to_a_single_width(tmp_path):
-    out = run_js(tmp_path, """
-      console.log(JSON.stringify({
-        three: ["7", "42", "356"].map((v) => core.padRack(v, 3)),
-        four: ["7", "1000"].map((v) => core.padRack(v, 4)),
-        nonNumeric: core.padRack("A1", 3),
-      }));
-    """)
-    assert out == {"three": ["007", "042", "356"],
-                   "four": ["0007", "1000"],
-                   "nonNumeric": "A1"}

@@ -111,18 +111,6 @@ export function orphanKeys(edits, liveKeys) {
   return Object.keys(edits ?? {}).filter((k) => !live.has(k));
 }
 
-/**
- * Rack order is printed onto packets and read back by a barcode scanner, so
- * every value in a tab must be the same width or the sort breaks. Three digits
- * normally; four once any spike passes 999.
- */
-export function radixWidth(largestCount) {
-  return String(Math.max(0, largestCount)).length <= 3 ? 3 : 4;
-}
-
-/** Zero-pad to `width`, leaving anything non-numeric alone. */
-export function padRack(value, width) {
-  const s = String(value ?? "");
-  if (!NUMERIC.test(s)) return s;
-  return s.padStart(width, "0");
-}
+// Rack-order padding lived here until the client's packet-printing document
+// replaced it with one column per digit. That rule is in nursery-algos.js as
+// rackDigits(), beside the ordering it belongs with.
