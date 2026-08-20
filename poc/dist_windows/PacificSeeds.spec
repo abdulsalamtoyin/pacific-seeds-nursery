@@ -67,6 +67,10 @@ hiddenimports = [
     "map_parser",
     "fieldbook_export",
     "backend.app",
+    # Builds the .xlsx behind /export/xlsx. Named explicitly rather than left
+    # to analysis: a miss here only surfaces as an import error when the user
+    # clicks Export in the packaged app, long after the build looked fine.
+    "backend.xlsx_export",
 ]
 
 a = Analysis(
