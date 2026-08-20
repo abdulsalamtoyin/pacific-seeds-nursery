@@ -15,6 +15,9 @@ import {
 import * as store from "./store.js";
 import { grid } from "./grid.js";
 import { todayISO } from "./grid-core.js";
+import {
+  exportBartender, exportEachTab, exportGrid, exportWorkbook,
+} from "./exporter.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -107,6 +110,31 @@ function pageHead(title, subtitle) {
 
 function emptyState(msg) {
   return el("div", { class: "empty" }, msg);
+}
+
+// Tabs register how to build their sheet here, so "export the whole book" can
+// produce every tab without first rendering each one. A grid-backed view fills
+// this in as it renders; tabs not yet converted are simply absent.
+const SHEETS = new Map();
+
+function registerSheet(tabName, build) {
+  SHEETS.set(tabName, build);
+}
+
+/** Build every registered tab's sheet, in workbook tab order. */
+function allSheets() {
+  return visibleTabs()
+    .filter((t) => SHEETS.has(t))
+    .map((t) => SHEETS.get(t)());
+}
+
+/** Wrap an export so a failure explains itself rather than doing nothing. */
+async function runExport(label, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    alert(`${label} failed.\n\n${e.message}`);
+  }
 }
 
 /**
@@ -264,11 +292,43 @@ function nurseryPicker() {
     }, "Delete"));
 }
 
+// "Export whole book (in individual tabs) and individually" — both shapes.
+function exportBar() {
+  return el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => runExport("Whole-book export", async () => {
+        const sheets = allSheets();
+        if (!sheets.length) {
+          alert("Nothing to export yet — import the PRISM export first.");
+          return;
+        }
+        await exportWorkbook(state.fileName || state.code, sheets);
+      }),
+    }, "Export whole book"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => runExport("Per-tab export", async () => {
+        const sheets = allSheets();
+        if (!sheets.length) {
+          alert("Nothing to export yet — import the PRISM export first.");
+          return;
+        }
+        const skipped = await exportEachTab(state.fileName || state.code, sheets);
+        if (skipped.length) {
+          alert(`Exported ${sheets.length - skipped.length} tab(s).\n\n` +
+            `Skipped, having no rows yet: ${skipped.join(", ")}.`);
+        }
+      }),
+    }, "Export each tab separately"));
+}
+
 VIEWS.Home = (main) => {
   main.append(...pageHead("Nursery Workflow",
     "Run each step in order. The same steps as the workbook's Home tab."));
 
   main.append(nurseryPicker());
+  main.append(exportBar());
 
   if (!state.code) {
     main.append(el("div", { class: "note" },
@@ -646,17 +706,19 @@ VIEWS["Nursery list"] = (main) => {
     `${rows.length} unique Source IDs. Click a column heading to sort, or the ` +
     "▾ beside it to filter."));
 
+  const columns = [
+    { key: "Source ID", type: "text" },
+    { key: "Repeats", type: "number" },
+    { key: "Qty Required", type: "number" },
+    { key: "Inbred Code", type: "text" },
+    { key: "Hybrid Code", type: "text" },
+  ];
+
   const holder = el("div");
   const draw = () => {
-    holder.replaceChildren(grid({
+    const node = grid({
       id: "Nursery list",
-      columns: [
-        { key: "Source ID", type: "text" },
-        { key: "Repeats", type: "number" },
-        { key: "Qty Required", type: "number" },
-        { key: "Inbred Code", type: "text" },
-        { key: "Hybrid Code", type: "text" },
-      ],
+      columns,
       rows,
       // Source ID is unique here by construction, so it identifies the row.
       rowKey: (r) => r["Source ID"],
@@ -666,7 +728,20 @@ VIEWS["Nursery list"] = (main) => {
         if (key === "Hybrid Code" && dupHybrid.has(value)) return "#ffd9d9";
         return null;
       },
+      onExport: (api) => runExport("Export", () =>
+        exportGrid(state.code, "Nursery list", api)),
+    });
+    // Registered while rendered so the whole-book export picks up the user's
+    // own sorting, filters and added columns.
+    registerSheet("Nursery list", () => ({
+      name: "Nursery list",
+      headers: node.gridApi.columns().map((c) => c.label ?? c.key),
+      rows: node.gridApi.rows().map((r) =>
+        node.gridApi.columns().map((c) => r[c.key] ?? "")),
+      colours: node.gridApi.colours(),
+      styles: node.gridApi.styles(),
     }));
+    holder.replaceChildren(node);
   };
 
   main.append(el("div", { class: "btnrow" },

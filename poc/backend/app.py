@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -18,9 +19,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from backend.xlsx_export import workbook_bytes
 
 ROOT = Path(__file__).resolve().parent.parent
 # Per-user dirs can be overridden via env (set by the desktop launcher on Windows).
@@ -634,6 +637,49 @@ def save_field_map(code: str, payload: FieldMapPayload) -> dict:
 
 
 # Root = explanatory "How it works" page; PWA workflow lives at /app.
+class SheetSpec(BaseModel):
+    """One tab's worth of grid, as the browser is displaying it."""
+    name: str
+    headers: list[str] = []
+    rows: list[list[Any]] = []
+    # [[label, span], ...] — the merged band above the headers.
+    bands: list[list[Any]] | None = None
+    # "<row>,<col>" (zero-based, data rows only) -> "#rrggbb" / {bold, italic}
+    colours: dict[str, str] = {}
+    styles: dict[str, dict] = {}
+    widths: list[float] = []
+
+
+class ExportRequest(BaseModel):
+    filename: str = "nursery-export"
+    sheets: list[SheetSpec] = []
+
+
+@app.post("/export/xlsx")
+def export_xlsx(req: ExportRequest) -> Response:
+    """Build a real .xlsx from what the grid is showing.
+
+    The browser has no spreadsheet writer and we are not bundling one; the
+    backend already has openpyxl, so the grid posts its rows and gets a file
+    back. Used for single-tab export, whole-book export, and the Bartender
+    packet list.
+    """
+    payload = req.model_dump()
+    try:
+        data = workbook_bytes(payload)
+    except ValueError as e:
+        # An empty export is a mistake worth naming, not a blank file.
+        raise HTTPException(400, str(e))
+
+    stem = re.sub(r'[\\/:*?"<>|]+', "-", req.filename).strip() or "nursery-export"
+    return Response(
+        content=data,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        headers={"Content-Disposition": f'attachment; filename="{stem}.xlsx"'},
+    )
+
+
 @app.get("/")
 def landing() -> FileResponse:
     return FileResponse(PWA_DIR / "how-it-works.html")
