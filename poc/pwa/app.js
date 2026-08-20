@@ -13,6 +13,7 @@ import {
   serpentineByRange, serpentineTwoRowBands, assignSplits,
 } from "./nursery-algos.js";
 import * as store from "./store.js";
+import { grid } from "./grid.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -588,28 +589,40 @@ VIEWS["Nursery list"] = (main) => {
   const dupInbred = duplicateSet(entries.map(([, v]) => v.inbred));
   const dupHybrid = duplicateSet(entries.map(([, v]) => v.hybrid));
   let showDups = false;
-  let threshold = null;
+
+  const rows = entries.map(([src, v]) => ({
+    "Source ID": src,
+    Repeats: v.repeats,
+    "Qty Required": (v.repeats * 1.4).toFixed(1),
+    "Inbred Code": v.inbred ?? "",
+    "Hybrid Code": v.hybrid ?? "",
+  }));
+
+  main.append(el("p", { class: "sub" },
+    `${rows.length} unique Source IDs. Click a column heading to sort, or the ` +
+    "▾ beside it to filter."));
 
   const holder = el("div");
   const draw = () => {
-    holder.replaceChildren();
-    const shown = entries.filter(([, v]) =>
-      threshold === null || v.repeats * 1.4 > threshold);
-    holder.append(el("p", { class: "sub" },
-      `${shown.length} unique Source IDs` +
-      (threshold !== null ? ` needing more than ${threshold}` : "") + "."));
-    holder.append(table(
-      ["Source ID", "Repeats", "Qty Required", "Inbred Code", "Hybrid Code"],
-      shown.map(([src, v]) => [src, v.repeats, (v.repeats * 1.4).toFixed(1),
-        v.inbred, v.hybrid]),
-      {
-        cellClass: (i, j, c) => {
-          if (!showDups) return "";
-          if (j === 3 && dupInbred.has(c)) return "dup";
-          if (j === 4 && dupHybrid.has(c)) return "dup";
-          return "";
-        },
-      }));
+    holder.replaceChildren(grid({
+      id: "Nursery list",
+      columns: [
+        { key: "Source ID", type: "text" },
+        { key: "Repeats", type: "number" },
+        { key: "Qty Required", type: "number" },
+        { key: "Inbred Code", type: "text" },
+        { key: "Hybrid Code", type: "text" },
+      ],
+      rows,
+      // Source ID is unique here by construction, so it identifies the row.
+      rowKey: (r) => r["Source ID"],
+      cellColour: (row, key, value) => {
+        if (!showDups) return null;
+        if (key === "Inbred Code" && dupInbred.has(value)) return "#ffd9d9";
+        if (key === "Hybrid Code" && dupHybrid.has(value)) return "#ffd9d9";
+        return null;
+      },
+    }));
   };
 
   main.append(el("div", { class: "btnrow" },
@@ -618,27 +631,14 @@ VIEWS["Nursery list"] = (main) => {
       onclick: () => {
         showDups = !showDups;
         draw();
+        const n = dupInbred.size + dupHybrid.size;
         if (showDups) {
-          const n = dupInbred.size + dupHybrid.size;
           alert(n
             ? `${n} duplicated code value(s) highlighted.`
             : "No duplicate Inbred or Hybrid codes found.");
         }
       },
-    }, "Check duplicate codes"),
-    el("button", {
-      class: "action ghost",
-      onclick: () => {
-        const v = prompt("Show Source IDs with Qty Required above:", "10");
-        if (v === null) return;
-        threshold = num(v);
-        draw();
-      },
-    }, "Filter for bulk treatment"),
-    el("button", {
-      class: "action ghost",
-      onclick: () => { threshold = null; showDups = false; draw(); },
-    }, "Clear filters")));
+    }, "Check duplicate codes")));
 
   main.append(holder);
   draw();
