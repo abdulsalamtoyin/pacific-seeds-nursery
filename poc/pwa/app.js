@@ -14,9 +14,9 @@ import {
 } from "./nursery-algos.js";
 import * as store from "./store.js";
 import { grid } from "./grid.js";
-import { todayISO } from "./grid-core.js";
+import { padRack, radixWidth, todayISO } from "./grid-core.js";
 import {
-  exportBartender, exportEachTab, exportGrid, exportWorkbook,
+  download, exportBartender, exportEachTab, exportGrid, exportWorkbook,
 } from "./exporter.js";
 
 const $ = (sel) => document.querySelector(sel);
@@ -44,11 +44,16 @@ const REPLACEMENT_COLUMNS = [
 const PLANTING_ERROR_COLUMNS =
   REPLACEMENT_COLUMNS.filter((c) => c.key !== QR_REPLACED);
 
+// Paperbags & labels was added above Seedling and Post Harvest removed, both
+// on request. The stage column's own heading is left blank, as asked.
 const GROWTH_STAGES = [
+  ["Paperbags & labels", "#d9d2e9"],
   ["Seedling", "#fec000"], ["Vegetative", "#a9d08e"], ["Heading", "#ff6b6b"],
   ["Flowering", "#add8e6"], ["Grain filling", "#ffff99"],
-  ["Harvest", "#ccffcc"], ["Post Harvest", "#ccccff"],
+  ["Harvest", "#ccffcc"],
 ];
+
+const STAGE_COLOURS = new Map(GROWTH_STAGES);
 
 // ---------------------------------------------------------------- state
 //
@@ -121,6 +126,19 @@ function registerSheet(tabName, build) {
   SHEETS.set(tabName, build);
 }
 
+/** A rendered grid as a sheet description, for the whole-book export. */
+function sheetOf(name, api, extra = {}) {
+  const columns = api.columns();
+  return {
+    name,
+    headers: columns.map((c) => c.label ?? c.key),
+    rows: api.rows().map((r) => columns.map((c) => r[c.key] ?? "")),
+    colours: api.colours(),
+    styles: api.styles(),
+    ...extra,
+  };
+}
+
 /** Build every registered tab's sheet, in workbook tab order. */
 function allSheets() {
   return visibleTabs()
@@ -135,6 +153,78 @@ async function runExport(label, fn) {
   } catch (e) {
     alert(`${label} failed.\n\n${e.message}`);
   }
+}
+
+/**
+ * Choose rows from the rows that actually exist, rather than typing a list.
+ *
+ * Rows already claimed by an earlier planting date are shown disabled — a row
+ * in two planting dates would print packets onto the wrong split, and catching
+ * it here is friendlier than failing after the whole wizard has been filled in.
+ *
+ * @returns {Promise<number[]|null>} chosen rows, or null if cancelled.
+ */
+function pickRows(label, allRows, taken) {
+  return new Promise((resolve) => {
+    const chosen = new Set();
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const boxes = allRows.map((row) => {
+      const claimed = taken.has(row);
+      const box = el("input", { type: "checkbox" });
+      box.disabled = claimed;
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(row); else chosen.delete(row);
+      });
+      return el("label", {
+        class: "filter-row",
+        title: claimed ? "Already assigned to an earlier planting date" : "",
+        style: claimed ? "opacity:.45" : "",
+      }, box, el("span", {}, `Row ${row}`));
+    });
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal" },
+        el("h3", {}, label),
+        el("div", { class: "filter-list" }, boxes),
+        el("div", { class: "filter-actions" },
+          el("button", {
+            class: "action ghost",
+            onclick: () => {
+              boxes.forEach((l, i) => {
+                const box = l.querySelector("input");
+                if (box.disabled) return;
+                box.checked = true;
+                chosen.add(allRows[i]);
+              });
+            },
+          }, "All free rows"),
+          el("button", {
+            class: "action ghost",
+            onclick: () => {
+              boxes.forEach((l) => { l.querySelector("input").checked = false; });
+              chosen.clear();
+            },
+          }, "None")),
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => {
+              if (!chosen.size) {
+                alert("Pick at least one row.");
+                return;
+              }
+              close([...chosen].sort((a, b) => a - b));
+            },
+          }, "OK"),
+          el("button", { class: "action ghost", onclick: () => close(null) },
+            "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+  });
 }
 
 /**
@@ -499,32 +589,51 @@ VIEWS["Updated nursery site"] = (main) => {
     }, "Build Fieldbook from this tab")));
 };
 
-function buildMapGrid(valueKeys) {
+// Fields offered in the Material Map cell checkboxes. Anything PRISM supplies
+// can be shown; these are the ones worth defaulting to.
+const MAP_FIELDS = [
+  "Material ID", "Inbred Code", "Hybrid Code", "Source ID",
+  "Generation", "CMS reaction", "Pedigree",
+];
+const MAP_FIELDS_DEFAULT = ["Material ID", "Inbred Code", "Hybrid Code"];
+
+/**
+ * The field map as a map, not a table.
+ *
+ * Range numbers run down both sides and row numbers across top and bottom, as
+ * in the workbook. `cellText` decides what goes in each plot and `cellFill`
+ * what colour it is, so Material Map and Field Map share the same geometry.
+ */
+function buildMapGrid({ cellText, cellFill }) {
   const maxRange = Math.max(...state.prism.map((r) => num(r.Range)));
   const maxRow = Math.max(...state.prism.map((r) => num(r.Row)));
-  const cell = new Map();
-  for (const r of state.prism) {
-    cell.set(`${num(r.Range)}:${num(r.Row)}`,
-      valueKeys.map((k) => String(r[k] ?? "").slice(0, 14))
-        .filter(Boolean).join("\n"));
-  }
+  const byPlot = new Map(
+    state.prism.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
 
   const rowNums = Array.from({ length: maxRow }, (_, i) => i + 1);
-  const head = ["Rng \\ Row", ...rowNums, "Rng"];
+  const headCells = ["Rng \\ Row", ...rowNums, "Rng"]
+    .map((h) => el("th", {}, h));
+
   const body = [];
   // Ranges descend so the top range prints at the top, as in the workbook.
   for (let rng = maxRange; rng >= 1; rng--) {
-    body.push([rng, ...rowNums.map((w) => cell.get(`${rng}:${w}`) ?? ""), rng]);
+    const cells = [el("td", { class: "hdr" }, rng)];
+    for (const w of rowNums) {
+      const record = byPlot.get(`${rng}:${w}`);
+      const fill = record ? cellFill?.(record, rng, w) : null;
+      cells.push(el("td", { style: fill ? `background:${fill}` : "" },
+        record ? cellText(record, rng, w) : ""));
+    }
+    cells.push(el("td", { class: "hdr" }, rng));
+    body.push(el("tr", {}, cells));
   }
   // Row numbers repeat along the foot, as the client asked.
-  body.push(["Rng \\ Row", ...rowNums, "Rng"]);
+  body.push(el("tr", {},
+    ["Rng \\ Row", ...rowNums, "Rng"].map((h) => el("td", { class: "hdr" }, h))));
 
-  const tbl = table(head, body, {
-    cellClass: (i, j) =>
-      (j === 0 || j === maxRow + 1 || i === body.length - 1 ? "hdr" : ""),
-  });
-  tbl.querySelector("table").classList.add("grid");
-  return tbl;
+  return el("div", { class: "scroll" },
+    el("table", { class: "grid" },
+      el("thead", {}, el("tr", {}, headCells)), el("tbody", {}, body)));
 }
 
 VIEWS["Material Map"] = (main) => {
@@ -534,12 +643,81 @@ VIEWS["Material Map"] = (main) => {
     main.append(emptyState("Import Nursery site data first."));
     return;
   }
-  main.append(buildMapGrid(["Material ID", "Inbred Code", "Hybrid Code"]));
+
+  // Which fields appear in each cell is the user's choice, and it sticks.
+  const chosen = new Set(
+    state.mapFields?.length ? state.mapFields : MAP_FIELDS_DEFAULT);
+
+  const holder = el("div");
+  const draw = () => {
+    const keys = MAP_FIELDS.filter((k) => chosen.has(k));
+    holder.replaceChildren(buildMapGrid({
+      cellText: (r) => keys
+        .map((k) => String(r[k] ?? "").slice(0, 16))
+        .filter(Boolean).join("\n"),
+    }));
+  };
+
+  main.append(el("div", { class: "nursery-bar" },
+    el("label", {}, "Show in each cell"),
+    ...MAP_FIELDS.map((field) => {
+      const box = el("input", { type: "checkbox" });
+      box.checked = chosen.has(field);
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(field); else chosen.delete(field);
+        state.mapFields = [...chosen];
+        save();
+        draw();
+      });
+      return el("label", { class: "filter-row" }, box, el("span", {}, field));
+    })));
+
+  main.append(holder);
+  draw();
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => runExport("Export", () =>
+        download(`${state.code || "nursery"} - Material Map`,
+          [materialMapSheet(chosen)])),
+    }, "Export")));
+
+  registerSheet("Material Map", () => materialMapSheet(chosen));
 };
+
+/** Material Map as a grid of plots, laid out the way it is displayed. */
+function materialMapSheet(chosen) {
+  const keys = MAP_FIELDS.filter((k) => chosen.has(k));
+  const maxRange = Math.max(...state.prism.map((r) => num(r.Range)));
+  const maxRow = Math.max(...state.prism.map((r) => num(r.Row)));
+  const byPlot = new Map(
+    state.prism.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  const rowNums = Array.from({ length: maxRow }, (_, i) => i + 1);
+
+  const rows = [];
+  for (let rng = maxRange; rng >= 1; rng--) {
+    rows.push([rng, ...rowNums.map((w) => {
+      const r = byPlot.get(`${rng}:${w}`);
+      return r ? keys.map((k) => r[k] ?? "").filter(Boolean).join(" / ") : "";
+    }), rng]);
+  }
+  return {
+    name: "Material Map",
+    headers: ["Rng \\ Row", ...rowNums.map(String), "Rng"],
+    rows,
+  };
+}
+
+// One colour per planting date, so the map reads at a glance.
+const DOP_COLOURS = [
+  "#cfe2f3", "#d9ead3", "#fff2cc", "#f4cccc", "#e6d0f0",
+  "#d0e0e3", "#fce5cd", "#ead1dc",
+];
 
 VIEWS["Field Map"] = (main) => {
   main.append(...pageHead("Field Map",
-    "Same grid as Material Map, without material information."));
+    "Plots coloured by planting date, with the spike and run in each cell."));
 
   main.append(el("div", { class: "btnrow" },
     el("button", { class: "action", onclick: fieldMapWizard },
@@ -548,6 +726,7 @@ VIEWS["Field Map"] = (main) => {
       ? el("button", {
         class: "action ghost",
         onclick: () => {
+          if (!confirm("Clear the planting dates and row assignments?")) return;
           state.fieldMap = [];
           state.plantingDates = 1;
           save();
@@ -556,26 +735,78 @@ VIEWS["Field Map"] = (main) => {
       }, "Clear")
       : null));
 
-  if (state.fieldMap.length) {
-    const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
-    main.append(el("p", { class: "sub" },
-      `${dops.length} planting date(s), ${state.fieldMap.length} rows assigned. ` +
-      `Seed qty/plot: ${state.seedQty || "—"}`));
-    main.append(table(
-      ["Planting date", "Row", "Spike", "Run", "Split no.", "Seed qty/plot"],
-      state.fieldMap.map((e) => [e.dop, e.row, e.spike, e.run,
-        dops.indexOf(e.dop) + 1, e.qty]),
-      { cellClass: (i) => (state.fieldMap[i].run === "forward" ? "fwd" : "rev") }));
-  } else {
+  if (!state.fieldMap.length) {
     main.append(emptyState(
       "No planting dates set. Spike numbers follow the 1,2,2,1 cycle and runs " +
       "alternate every two rows, starting forward."));
+    return;
   }
 
+  const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
+  const byRow = new Map(state.fieldMap.map((e) => [e.row, e]));
+  const colourFor = (dop) => DOP_COLOURS[dops.indexOf(dop) % DOP_COLOURS.length];
+
+  main.append(el("p", { class: "sub" },
+    `${dops.length} planting date(s), ${state.fieldMap.length} rows assigned. ` +
+    `Seed qty/plot: ${state.seedQty || "—"} g`));
+
+  // Legend, so the colours mean something without hovering.
+  main.append(el("div", { class: "nursery-bar" },
+    el("label", {}, "Planting dates"),
+    ...dops.map((dop, i) => el("span", { class: "legend-chip" },
+      el("span", {
+        class: "legend-swatch",
+        style: `background:${colourFor(dop)}`,
+      }),
+      `${i + 1}. ${dop}`))));
+
   if (state.prism.length) {
-    main.append(el("h1", { style: "margin-top:24px;font-size:16px" }, "Grid"));
-    main.append(buildMapGrid([]));
+    main.append(buildMapGrid({
+      // Each plot shows which spike it belongs to and which way the run goes,
+      // which is what the planting crew needs off the map itself.
+      cellText: (_r, _rng, row) => {
+        const hit = byRow.get(row);
+        if (!hit) return "";
+        return `S${hit.spike}\n${hit.run === "forward" ? "▶" : "◀"}`;
+      },
+      cellFill: (_r, _rng, row) => {
+        const hit = byRow.get(row);
+        return hit ? colourFor(hit.dop) : null;
+      },
+    }));
   }
+
+  // The row assignments themselves stay available as an editable table.
+  main.append(el("h1", { style: "margin-top:24px;font-size:16px" },
+    "Row assignments"));
+
+  const rows = state.fieldMap.map((e) => ({
+    "Planting date": e.dop,
+    Row: e.row,
+    Spike: e.spike,
+    Run: e.run,
+    "Split no.": dops.indexOf(e.dop) + 1,
+    "Seed qty/plot (g)": e.qty,
+  }));
+
+  const node = grid({
+    id: "Field Map",
+    columns: [
+      { key: "Planting date", type: "date" },
+      { key: "Row", type: "number" },
+      { key: "Spike", type: "number" },
+      { key: "Run", type: "select", options: ["forward", "reverse"] },
+      { key: "Split no.", type: "number" },
+      { key: "Seed qty/plot (g)", type: "text" },
+    ],
+    rows,
+    rowKey: (r) => `row:${r.Row}`,
+    cellColour: (row) => colourFor(row["Planting date"]),
+    onExport: (api) => runExport("Export", () =>
+      exportGrid(state.code, "Field Map", api)),
+  });
+  registerSheet("Field Map", () => sheetOf("Field Map", node.gridApi));
+  main.append(node);
 };
 
 async function fieldMapWizard() {
@@ -590,17 +821,24 @@ async function fieldMapWizard() {
   const qty = prompt("Seed quantity per plot (grams):", state.seedQty || "");
   if (qty === null) return;
 
+  const allRows = [...new Set(state.prism.map((r) => num(r.Row)))]
+    .filter((r) => r > 0).sort((a, b) => a - b);
+
   const dopRows = [];
   const dops = [];
   for (let i = 1; i <= n; i++) {
     // Picked from a calendar so every planting date is the same ISO shape —
     // the Packet Prep split and the Nursery data rows both group on it.
+    // Picked from a calendar so every planting date is the same ISO shape —
+    // the Packet Prep split and the Nursery data rows both group on it.
     const dop = await pickDate(`Date of planting ${i}`, dops[i - 2]);
     if (!dop) return;
-    const rowsCsv = prompt(`Rows for planting date ${i} (comma separated):`);
-    if (!rowsCsv) return;
+    const already = new Set(dopRows.flat());
+    const picked = await pickRows(
+      `Rows for planting date ${i} (${dop})`, allRows, already);
+    if (!picked) return;
     dops.push(dop);
-    dopRows.push(rowsCsv.split(",").map((s) => num(s)).filter((r) => r > 0));
+    dopRows.push(picked);
   }
 
   // A row in two planting dates would print packets onto the wrong split,
@@ -639,9 +877,110 @@ VIEWS["Nursery data"] = (main) => {
   main.append(el("div",
     { style: "font-weight:700;font-size:19px;margin:6px 0 14px" },
     "R&D Fieldbook - Grain Sorghum"));
-  main.append(table(["", ""],
-    SPEC.nursery_data_labels.map((label) => [label, ""])));
+  // "1st DOP and rows" etc. are filled from Field Map. The base spec names
+  // three; a nursery with more planting dates gets the extra labels appended
+  // rather than quietly losing a date.
+  const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
+  const ordinal = (n) => {
+    const teens = n % 100 >= 11 && n % 100 <= 13;
+    const suffix = teens ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] ?? "th");
+    return `${n}${suffix}`;
+  };
+  const labels = [...SPEC.nursery_data_labels];
+  for (let i = 4; i <= dops.length; i++) {
+    const label = `${ordinal(i)} DOP and rows`;
+    if (!labels.includes(label)) {
+      labels.splice(labels.indexOf("Tag rows"), 0, label);
+    }
+  }
+
+  const dopFor = (label) => {
+    const m = /^(\d+)(?:st|nd|rd|th) DOP and rows$/.exec(label);
+    if (!m) return null;
+    const dop = dops[Number(m[1]) - 1];
+    if (!dop) return "";
+    const rows = state.fieldMap.filter((e) => e.dop === dop)
+      .map((e) => e.row).sort((a, b) => a - b);
+    return `${dop} — rows ${rows.join(", ")}`;
+  };
+
+  const defaults = SPEC.nursery_data_defaults ?? {};
+  const isDate = (label) => /date/i.test(label);
+
+  const rows = labels.map((label) => {
+    const saved = state.nurseryData[label] ?? {};
+    const computed = dopFor(label);
+    return {
+      Item: label,
+      Value: saved.value ?? computed ?? defaults[label] ?? "",
+      Comments: saved.comment ?? "",
+    };
+  });
+
+  const node = grid({
+    id: "Nursery data",
+    columns: [
+      { key: "Item", type: "text", readOnly: true },
+      // Only the rows whose label mentions a date get a calendar — "Planter"
+      // and "Seeds/side" are on the same column but are not dates.
+      { key: "Value", type: "text", typeFor: (row) => (isDate(row.Item) ? "date" : "text") },
+      { key: "Comments", type: "multiline" },
+    ],
+    rows,
+    rowKey: (r) => r.Item,
+    owned: true,
+    onEdit: (row, key, value) => {
+      const entry = state.nurseryData[row.Item] ?? {};
+      if (key === "Value") entry.value = value;
+      if (key === "Comments") entry.comment = value;
+      state.nurseryData[row.Item] = entry;
+      save();
+    },
+    onExport: (api) => runExport("Export", () =>
+      exportGrid(state.code, "Nursery data", api)),
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action ghost", onclick: captureGps }, "Capture GPS"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        for (const [label, value] of Object.entries(defaults)) {
+          state.nurseryData[label] = {
+            ...(state.nurseryData[label] ?? {}), value,
+          };
+        }
+        save();
+        render();
+      },
+    }, "Restore defaults")));
+
+  registerSheet("Nursery data", () => sheetOf("Nursery data", node.gridApi));
+  main.append(node);
 };
+
+/** Write the device's coordinates into the GPS row; still editable after. */
+function captureGps() {
+  if (!navigator.geolocation) {
+    alert("This device has no location service. Type the coordinates in by hand.");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude } = pos.coords;
+      const value = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+      state.nurseryData["GPS coordinates"] = {
+        ...(state.nurseryData["GPS coordinates"] ?? {}), value,
+      };
+      save();
+      render();
+      alert(`GPS captured: ${value}`);
+    },
+    (err) => alert(
+      `Could not read the location (${err.message}).\n\n` +
+      "Type the coordinates in by hand instead."),
+    { enableHighAccuracy: true, timeout: 15000 });
+}
 
 VIEWS["Packet Prep"] = (main, tabName) => {
   const splitNo = num(tabName.split(" ").pop()) || 1;
@@ -654,21 +993,81 @@ VIEWS["Packet Prep"] = (main, tabName) => {
     return;
   }
 
-  const rows = state.prism
-    .filter((r) => splitForRow(num(r.Row)) === splitNo)
-    .map((r) => {
-      const rng = num(r.Range);
-      const row = num(r.Row);
-      return [qrText(r), rng, row, plotOf(r), rng, row, splitNo,
-        r["Material ID"], r["Inbred Code"], r["Source ID"],
-        r["CMS reaction"], r.Generation];
-    });
+  const packets = state.prism.filter((r) => splitForRow(num(r.Row)) === splitNo);
 
-  main.append(el("p", { class: "sub" }, `${rows.length} packets in this split.`));
-  main.append(table(
-    ["QR CODE", "Range", "Row", "Plot", "SPIKE#", "RACK ORDER", "Split no.",
-      "Material ID", "Inbred Code", "Source ID", "CMS reaction", "Generation"],
-    rows));
+  // Rack order counts within a spike, so the packets come off the rack in the
+  // order they are planted. Every value in the tab is padded to one width —
+  // a scanner sorting "10" before "9" would misfeed the whole rack — and the
+  // width steps to four digits once any spike passes 999.
+  const perSpike = new Map();
+  for (const r of packets) {
+    const spike = spikeForRow(num(r.Row));
+    perSpike.set(spike, (perSpike.get(spike) ?? 0) + 1);
+  }
+  const width = radixWidth(Math.max(0, ...perSpike.values()));
+
+  const seen = new Map();
+  const rows = packets.map((r) => {
+    const rng = num(r.Range);
+    const row = num(r.Row);
+    const spike = spikeForRow(row);
+    const seq = (seen.get(spike) ?? 0) + 1;
+    seen.set(spike, seq);
+    return {
+      "Nursery name": state.code,
+      "QR CODE": qrText(r),
+      Range: rng,
+      Row: row,
+      Plot: plotOf(r),
+      "SPIKE#": spike,
+      "RACK ORDER": padRack(seq, width),
+      "Split no.": splitNo,
+      "Material ID": r["Material ID"] ?? "",
+      "Inbred Code": r["Inbred Code"] ?? "",
+      "Hybrid Code": r["Hybrid Code"] ?? "",
+      "Source ID": r["Source ID"] ?? "",
+      "CMS reaction": r["CMS reaction"] ?? "",
+      Generation: r.Generation ?? "",
+    };
+  });
+
+  main.append(el("p", { class: "sub" },
+    `${rows.length} packets in this split, rack order padded to ${width} ` +
+    `digits across ${perSpike.size} spike(s).`));
+
+  const node = grid({
+    id: tabName,
+    columns: [
+      { key: "Nursery name", type: "text" },
+      { key: "QR CODE", type: "text" },
+      { key: "Range", type: "number" },
+      { key: "Row", type: "number" },
+      { key: "Plot", type: "text" },
+      { key: "SPIKE#", type: "number" },
+      { key: "RACK ORDER", type: "text" },
+      { key: "Split no.", type: "number" },
+      { key: "Material ID", type: "text" },
+      { key: "Inbred Code", type: "text" },
+      { key: "Hybrid Code", type: "text" },
+      { key: "Source ID", type: "text" },
+      { key: "CMS reaction", type: "text" },
+      { key: "Generation", type: "text" },
+    ],
+    rows,
+    rowKey: (r) => r.Plot,
+    onExport: (api) => runExport("Export", () =>
+      exportGrid(state.code, tabName, api)),
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => runExport("Bartender export", () =>
+        exportBartender(state.code, tabName, node.gridApi)),
+    }, "Export for Bartender (Source ID Z→A)")));
+
+  registerSheet(tabName, () => sheetOf(tabName, node.gridApi));
+  main.append(node);
 };
 
 VIEWS["Nursery list"] = (main) => {
@@ -733,14 +1132,7 @@ VIEWS["Nursery list"] = (main) => {
     });
     // Registered while rendered so the whole-book export picks up the user's
     // own sorting, filters and added columns.
-    registerSheet("Nursery list", () => ({
-      name: "Nursery list",
-      headers: node.gridApi.columns().map((c) => c.label ?? c.key),
-      rows: node.gridApi.rows().map((r) =>
-        node.gridApi.columns().map((c) => r[c.key] ?? "")),
-      colours: node.gridApi.colours(),
-      styles: node.gridApi.styles(),
-    }));
+    registerSheet("Nursery list", () => sheetOf("Nursery list", node.gridApi));
     holder.replaceChildren(node);
   };
 
@@ -765,7 +1157,65 @@ VIEWS["Nursery list"] = (main) => {
 
 // Replacements and Planting errors are the same log with a different column
 // set, so they share a renderer. `storeKey` picks which list is being edited.
-function logView(main, { title, subtitle, storeKey, columns }) {
+// The nine fields the client's export format wants for each entry, in order.
+const ENTRY_BLOCK = [
+  "QR Key", "Source ID", "Material ID", "Inbred Code",
+  "Experimental Hybrid Code", "Pedigree", "Generation", "CMS reaction",
+  "W/column",
+];
+
+/**
+ * Expand a scanned QR back into the full nine-column entry block.
+ *
+ * This is what lets the tab stay short. The client asked to drop Material ID,
+ * Source ID and the rest from the screen, but the export format still carries
+ * them — so they are looked up from the nursery data at export time rather
+ * than typed twice.
+ *
+ * W/column has no source in PRISM yet, so it exports blank.
+ */
+function entryBlockFor(qr) {
+  const payload = String(qr ?? "").trim();
+  if (!payload) return ENTRY_BLOCK.map(() => "");
+  const plot = payload.split(",")[0].trim();
+  const hit = state.prism.find((r) => plotOf(r) === plot)
+    || state.updatedPrism.find((r) => plotOf(r) === plot);
+  if (!hit) return [payload, ...ENTRY_BLOCK.slice(1).map(() => "")];
+  return [
+    payload,
+    hit["Source ID"] ?? "",
+    hit["Material ID"] ?? "",
+    hit["Inbred Code"] ?? "",
+    hit["Hybrid Code"] ?? "",
+    hit.Pedigree ?? "",
+    hit.Generation ?? "",
+    hit["CMS reaction"] ?? "",
+    hit["W/column"] ?? "",
+  ];
+}
+
+/** The banded sheet from Tab information.xlsx, for either log. */
+function logSheet(tabName, storeKey, withReplaced) {
+  const bands = withReplaced
+    ? [["Original entry", 9], ["Replaced entry", 9], ["Reason", 1]]
+    : [["Original entry", 9], ["Reason", 1]];
+  const headers = withReplaced
+    ? [...ENTRY_BLOCK, ...ENTRY_BLOCK, "Reason"]
+    : [...ENTRY_BLOCK, "Reason"];
+  const rows = state[storeKey].map((rec) => {
+    const original = entryBlockFor(rec[QR_ORIGINAL]);
+    const reason = rec.Reason ?? "";
+    return withReplaced
+      ? [...original, ...entryBlockFor(rec[QR_REPLACED]), reason]
+      : [...original, reason];
+  });
+  return { name: tabName, bands, headers, rows };
+}
+
+// Replacements and Planting errors are the same log with a different column
+// set, so they share a renderer.
+function logView(main, { tabName, title, subtitle, storeKey, columns,
+  withReplaced }) {
   main.append(...pageHead(title, subtitle));
 
   const blankRow = () => Object.fromEntries(columns.map((c) => [
@@ -782,59 +1232,64 @@ function logView(main, { title, subtitle, storeKey, columns }) {
     el("button", {
       class: "action ghost",
       onclick: () => resolvePlots(storeKey),
-    }, "Read QR → Plot")));
+    }, "Read QR → Plot"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => runExport("Export", async () => {
+        const sheet = logSheet(tabName, storeKey, withReplaced);
+        if (!sheet.rows.length) {
+          alert(`Nothing logged on ${title} yet.`);
+          return;
+        }
+        await download(`${state.code || "nursery"} - ${tabName}`, [sheet]);
+      }),
+    }, "Export (client format)")));
+
+  // The export is always available from the button above, even when the tab
+  // is empty, so it is registered before the early return.
+  registerSheet(tabName, () => logSheet(tabName, storeKey, withReplaced));
 
   if (!state[storeKey].length) {
     main.append(emptyState(`Nothing logged on ${title}.`));
     return;
   }
 
-  const head = el("tr", {},
-    columns.map((c) => el("th", {}, c.key)).concat([el("th", {}, "")]));
-
-  const body = state[storeKey].map((rec, i) => {
-    const cells = columns.map((c) => {
-      if (c.type === "select") {
-        return el("td", {}, el("select", {
-          class: "f",
-          onchange: (e) => { rec[c.key] = e.target.value; save(); },
-        }, c.options.map((o) => el("option",
-          o === rec[c.key] ? { value: o, selected: "selected" } : { value: o },
-          o))));
-      }
-      return el("td", {}, el("input", {
-        class: "f",
-        value: rec[c.key] ?? "",
-        // The QR payload is long; give it room so the column fits its contents.
-        style: c.wide ? "min-width:340px" : "",
-        oninput: (e) => { rec[c.key] = e.target.value; save(); },
-      }));
-    });
-    cells.push(el("td", {}, el("button", {
-      class: "action ghost",
-      onclick: () => { state[storeKey].splice(i, 1); save(); render(); },
-    }, "Remove")));
-    return el("tr", {}, cells);
-  });
-
-  main.append(el("div", { class: "scroll" },
-    el("table", { class: "fit" },
-      el("thead", {}, head), el("tbody", {}, body))));
+  main.append(grid({
+    id: tabName,
+    columns,
+    rows: state[storeKey],
+    // These rows have no natural key, so position is the identity — safe
+    // because the tab owns its data and nothing rebuilds it underneath.
+    rowKey: (_row, i) => `row:${i}`,
+    owned: true,
+    onEdit: () => save(),
+    onAddRow: () => { state[storeKey].push(blankRow()); save(); render(); },
+    onDeleteRow: (row) => {
+      const i = state[storeKey].indexOf(row);
+      if (i >= 0) state[storeKey].splice(i, 1);
+      save();
+      render();
+    },
+  }));
 }
 
 VIEWS.Replacements = (main) => logView(main, {
+  tabName: "Replacements",
   title: "Replacements",
   subtitle: "Scan the original entry and its replacement. The export expands " +
-    "each QR into the full entry block.",
+    "each QR into the full nine-column entry block.",
   storeKey: "replacements",
   columns: REPLACEMENT_COLUMNS,
+  withReplaced: true,
 });
 
 VIEWS["Planting errors"] = (main) => logView(main, {
+  tabName: "Planting errors",
   title: "Planting errors",
   subtitle: "Original entry only — nothing was planted in its place.",
   storeKey: "plantingErrors",
   columns: PLANTING_ERROR_COLUMNS,
+  withReplaced: false,
 });
 
 // The QR payload leads with the plot, so a scan can fill the Plot column.
@@ -862,47 +1317,152 @@ function resolvePlots(storeKey) {
     : `${resolved} scan(s) resolved to a plot.`);
 }
 
+/** Fieldbook rows in serpentine order, shared with Date recording. */
+function fieldbookRows() {
+  const src = state.updatedPrism;
+  const plots = src.map((r) => [num(r.Range), num(r.Row)]);
+  const byPlot = new Map(src.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  return serpentineByRange(plots).map(([rng, row]) => {
+    const r = byPlot.get(`${rng}:${row}`) || {};
+    return {
+      Range: rng,
+      Row: row,
+      "Material ID": r["Material ID"] ?? "",
+      "Source ID": r["Source ID"] ?? "",
+      "Inbred Code": r["Inbred Code"] ?? "",
+      "Hybrid Code": r["Hybrid Code"] ?? "",
+      Gen: r.Generation ?? "",
+      CMS: r["CMS reaction"] ?? "",
+      Plot: `${rng}_${row}`,
+      Comments: r.Comments ?? "",
+    };
+  });
+}
+
 VIEWS.Fieldbook = (main) => {
   main.append(...pageHead("Fieldbook",
-    "Built from Updated nursery site. Range, Row, Material ID, Source ID, " +
-    "Gen, CMS, Plot, Comments."));
+    "Built from Updated nursery site, in serpentine order."));
 
-  const src = state.updatedPrism;
-  if (!src.length) {
+  if (!state.updatedPrism.length) {
     main.append(emptyState(
       "Import the updated PRISM export on the ‘Updated nursery site’ tab first."));
     return;
   }
 
-  const plots = src.map((r) => [num(r.Range), num(r.Row)]);
-  const order = serpentineByRange(plots);
-  const byPlot = new Map(src.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  // Print sits at the top, as asked — it is the reason this tab is opened.
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => window.print() }, "Print"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => captureFieldbook(),
+    }, "Capture"),
+    isType("AB")
+      ? el("button", {
+        class: "action ghost",
+        onclick: () => { activeTab = "Date recording"; render(); },
+      }, "AB selection map")
+      : null));
 
-  const rows = order.map(([rng, row]) => {
-    const r = byPlot.get(`${rng}:${row}`) || {};
-    return [rng, row, r["Material ID"], r["Source ID"], r.Generation,
-      r["CMS reaction"], `${rng}_${row}`, r.Comments];
+  const all = fieldbookRows();
+  let rangeQuery = "";
+  let rowQuery = "";
+  const holder = el("div");
+
+  // Range and Row are searched separately, and an empty box means "all" —
+  // so one box alone narrows to a whole bay or a whole row.
+  const draw = () => {
+    const rows = all.filter((r) =>
+      (!rangeQuery || String(r.Range) === rangeQuery)
+      && (!rowQuery || String(r.Row) === rowQuery));
+
+    const node = grid({
+      id: "Fieldbook",
+      columns: [
+        { key: "Range", type: "number" },
+        { key: "Row", type: "number" },
+        { key: "Material ID", type: "text" },
+        { key: "Source ID", type: "text" },
+        { key: "Inbred Code", type: "text" },
+        { key: "Hybrid Code", type: "text" },
+        { key: "Gen", type: "text" },
+        { key: "CMS", type: "text" },
+        { key: "Plot", type: "text" },
+        { key: "Comments", type: "multiline" },
+      ],
+      rows,
+      rowKey: (r) => r.Plot,
+      cellColour: (row) =>
+        (isType("AB") && String(row.CMS).toUpperCase() === "B"
+          ? "#e2f0d9" : null),
+      onExport: (api) => runExport("Export", () =>
+        exportGrid(state.code, "Fieldbook", api)),
+    });
+    registerSheet("Fieldbook", () => sheetOf("Fieldbook", node.gridApi));
+
+    holder.replaceChildren(
+      el("p", { class: "sub" },
+        `${rows.length} of ${all.length} plots` +
+        (isType("AB") ? ". B lines shaded green." : ".")),
+      node);
+  };
+
+  const rangeBox = el("input", {
+    class: "f", type: "number", placeholder: "All ranges",
+    oninput: (e) => { rangeQuery = e.target.value.trim(); draw(); },
+  });
+  const rowBox = el("input", {
+    class: "f", type: "number", placeholder: "All rows",
+    oninput: (e) => { rowQuery = e.target.value.trim(); draw(); },
   });
 
-  const ab = isType("AB");
-  main.append(el("p", { class: "sub" },
-    `${rows.length} plots, serpentine order (rows descend on even ranges).` +
-    (ab ? " B lines shaded green." : "")));
-  main.append(table(
-    ["Range", "Row", "Material ID", "Source ID", "Gen", "CMS", "Plot", "Comments"],
-    rows,
-    {
-      cellClass: (i) =>
-        (ab && String(rows[i][5]).toUpperCase() === "B" ? "bline" : ""),
-    }));
+  main.append(el("div", { class: "nursery-bar" },
+    el("label", {}, "Range"), rangeBox,
+    el("label", {}, "Row"), rowBox,
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        rangeBox.value = "";
+        rowBox.value = "";
+        rangeQuery = "";
+        rowQuery = "";
+        draw();
+      },
+    }, "Show all")));
+
+  main.append(holder);
+  draw();
 
   main.append(el("div", { class: "note" },
     "Printing: landscape A4, duplex flipped on the short edge, page numbers " +
     "centred, file name top right. Duplex is a printer-driver setting — " +
     "choose it in the print dialog."));
-  main.append(el("div", { class: "btnrow" },
-    el("button", { class: "action", onclick: () => window.print() }, "Print")));
 };
+
+/**
+ * Capture the fieldbook as it stands.
+ *
+ * Read as a timestamped snapshot of what is on screen, so a walk of the
+ * nursery can be kept and compared later. Confirm with the client if they
+ * meant something else by "capture".
+ */
+function captureFieldbook() {
+  const rows = fieldbookRows();
+  if (!rows.length) {
+    alert("Nothing to capture yet.");
+    return;
+  }
+  const label = prompt("Name this capture:",
+    `Fieldbook ${todayISO()}`);
+  if (!label) return;
+  state.snapshots.push({
+    label,
+    takenAt: new Date().toISOString(),
+    rows,
+  });
+  save();
+  alert(`Captured ${rows.length} plots as “${label}”.\n\n` +
+    `${state.snapshots.length} capture(s) stored for this nursery.`);
+}
 
 VIEWS["Date recording"] = (main) => {
   main.append(...pageHead("Date recording",
@@ -952,27 +1512,56 @@ VIEWS["Date recording"] = (main) => {
   draw();
 };
 
-function groupedView(main, title, store) {
-  main.append(...pageHead(title, ""));
-  const head = el("tr", {},
-    ["Stage", "Group 1", "Group 2", "Group 3"].map((h) => el("th", {}, h)));
-  const body = GROWTH_STAGES.map(([stage, colour]) =>
-    el("tr", {},
-      el("td",
-        { style: `background:${colour};font-weight:700;text-align:center` },
-        stage),
-      [1, 2, 3].map((g) => el("td", {},
-        el("input", {
-          class: "f",
-          value: state[store][`${stage}|${g}`] ?? "",
-          oninput: (e) => { state[store][`${stage}|${g}`] = e.target.value; save(); },
-        })))));
-  main.append(el("div", { class: "scroll" },
-    el("table", {}, el("thead", {}, head), el("tbody", {}, body))));
+// Operations and Comments are the same shape: growth stages down the side,
+// groups across. Cells take multiple lines, and extra group columns can be
+// added from the grid toolbar.
+function groupedView(main, tabName, title, storeKey) {
+  main.append(...pageHead(title,
+    "Cells take multiple lines. Add group columns from the toolbar."));
+
+  // Stored as "<stage>|<group>", so the grid's row objects are built from the
+  // map on the way in and written back on the way out.
+  const rows = GROWTH_STAGES.map(([stage]) => {
+    const row = { Stage: stage };
+    for (const g of [1, 2, 3]) {
+      row[`Group ${g}`] = state[storeKey][`${stage}|${g}`] ?? "";
+    }
+    return row;
+  });
+
+  const columns = [
+    // The heading is deliberately blank — the stage names speak for themselves.
+    { key: "Stage", label: "", type: "text", readOnly: true },
+    { key: "Group 1", type: "multiline" },
+    { key: "Group 2", type: "multiline" },
+    { key: "Group 3", type: "multiline" },
+  ];
+
+  const node = grid({
+    id: tabName,
+    columns,
+    rows,
+    rowKey: (r) => r.Stage,
+    owned: true,
+    onEdit: (row, key, value) => {
+      const group = key.startsWith("Group ") ? key.slice(6) : null;
+      if (group) state[storeKey][`${row.Stage}|${group}`] = value;
+      save();
+    },
+    cellColour: (row, key) =>
+      (key === "Stage" ? STAGE_COLOURS.get(row.Stage) ?? null : null),
+    onExport: (api) => runExport("Export", () =>
+      exportGrid(state.code, tabName, api)),
+  });
+
+  registerSheet(tabName, () => sheetOf(tabName, node.gridApi));
+  main.append(node);
 }
 
-VIEWS.Operations = (main) => groupedView(main, "Operations Overview", "operations");
-VIEWS.Comments = (main) => groupedView(main, "Field Comments", "comments");
+VIEWS.Operations = (main) =>
+  groupedView(main, "Operations", "Operations Overview", "operations");
+VIEWS.Comments = (main) =>
+  groupedView(main, "Comments", "Field Comments", "comments");
 
 function viewMissing(main, name) {
   main.append(...pageHead(name, "Nursery-type extra."));

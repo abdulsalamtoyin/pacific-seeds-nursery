@@ -124,9 +124,16 @@ export function grid(cfg) {
   // when painting the input — keeps the value shown, filtered, sorted and
   // exported identical.
   const today = todayISO();
-  const columnFor = (key) => allColumns().find((c) => c.key === key);
+  const columnFor = (key, rec) => {
+    const column = allColumns().find((c) => c.key === key);
+    // Resolve a per-row type so a date row in a mixed column still defaults.
+    return column?.typeFor && rec
+      ? { ...column, type: column.typeFor(rec.src) }
+      : column;
+  };
   const valueOf = (rec, key) => defaultedValue(
-    effectiveValue(rec, key, { owned, edits: gs.edits }), columnFor(key), today);
+    effectiveValue(rec, key, { owned, edits: gs.edits }),
+    columnFor(key, rec), today);
 
   function setValue(rec, key, value) {
     if (overlaid(rec)) {
@@ -467,17 +474,21 @@ export function grid(cfg) {
         },
       });
 
+      // A column can vary its type per row — Nursery data puts dates and
+      // plain text in the same column, and only the dates want a calendar.
+      const type = c.typeFor ? c.typeFor(rec.src) : c.type;
+
       let field;
       if (c.readOnly) {
         field = el("span", { class: "ro" }, value);
-      } else if (c.type === "select") {
+      } else if (type === "select") {
         field = el("select", {
           class: "f",
           onchange: (e) => { setValue(rec, c.key, e.target.value); redraw(); },
         }, (c.options ?? []).map((o) => el("option",
           String(o) === String(value) ? { value: o, selected: "selected" } : { value: o },
           o)));
-      } else if (c.type === "multiline") {
+      } else if (type === "multiline") {
         field = el("textarea", {
           class: "f",
           rows: "2",
@@ -487,7 +498,7 @@ export function grid(cfg) {
       } else {
         field = el("input", {
           class: "f",
-          type: c.type === "date" ? "date" : (c.type === "number" ? "number" : "text"),
+          type: type === "date" ? "date" : (type === "number" ? "number" : "text"),
           value,
           oninput: (e) => setValue(rec, c.key, e.target.value),
         });

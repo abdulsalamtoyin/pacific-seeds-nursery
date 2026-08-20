@@ -23,6 +23,7 @@ export const BLANK_NURSERY = {
   updatedPrism: [],    // rows from Updated nursery site
   fieldMap: [],        // {dop, row, spike, run, qty}
   nurseryData: {},     // label -> {value, comment}
+  mapFields: [],       // which fields Material Map shows in each cell
   replacements: [],
   plantingErrors: [],
   operations: {},      // "stage|group" -> text

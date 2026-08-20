@@ -141,6 +141,19 @@
     width: 100%; max-width: 420px; padding: 7px 9px;
     border: 1px solid var(--line); border-radius: 5px; font-size: 13px;
   }
+  /* Planting-date legend on Field Map. */
+  .legend-chip {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
+    padding: 2px 8px 2px 4px; border: 1px solid var(--line); border-radius: 20px;
+    background: #fff;
+  }
+  .legend-swatch {
+    width: 14px; height: 14px; border-radius: 3px; border: 1px solid var(--line);
+  }
+  /* Map cells carry two short lines (spike, run) and must stay compact. */
+  table.grid td { white-space: pre-line; text-align: center; vertical-align: middle; }
+  table.grid td.hdr { font-weight: 700; background: #f2f4f7; }
+
   /* ---- date picker modal ---- */
   .modal-backdrop {
     position: fixed; inset: 0; z-index: 60; display: flex;
