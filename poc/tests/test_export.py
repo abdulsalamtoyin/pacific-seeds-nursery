@@ -237,3 +237,43 @@ def test_dates_are_written_as_the_iso_text_they_arrived_as():
 def test_blank_cells_stay_blank():
     ws = roundtrip(simple(rows=[[1, 2, ""]]))["Sheet1"]
     assert ws["C2"].value in (None, "")
+
+
+# ------------------------------------------------ alignment, size and colour
+#
+# Added when the client asked for "a bit more to the formatting option like
+# alignment, text size and text colour". These have to reach the spreadsheet,
+# not just the screen.
+
+
+def test_text_colour_reaches_the_cell():
+    ws = roundtrip(simple(styles={"0,0": {"colour": "#c00000"}}))["Sheet1"]
+    assert ws["A2"].font.color.rgb == "FFC00000"
+
+
+def test_text_size_reaches_the_cell():
+    ws = roundtrip(simple(styles={"0,1": {"size": 16}}))["Sheet1"]
+    assert ws["B2"].font.size == 16
+
+
+@pytest.mark.parametrize("align", ["left", "center", "right"])
+def test_alignment_reaches_the_cell(align):
+    ws = roundtrip(simple(styles={"0,2": {"align": align}}))["Sheet1"]
+    assert ws["C2"].alignment.horizontal == align
+
+
+def test_an_unknown_alignment_is_ignored():
+    ws = roundtrip(simple(styles={"0,0": {"align": "diagonal"}}))["Sheet1"]
+    assert ws["A2"].alignment.horizontal is None
+
+
+def test_formatting_can_be_combined_on_one_cell():
+    ws = roundtrip(simple(styles={
+        "0,0": {"bold": True, "italic": True, "size": 14,
+                "colour": "#1f4e79", "align": "center"},
+    }))["Sheet1"]
+    cell = ws["A2"]
+    assert cell.font.bold and cell.font.italic
+    assert cell.font.size == 14
+    assert cell.font.color.rgb == "FF1F4E79"
+    assert cell.alignment.horizontal == "center"

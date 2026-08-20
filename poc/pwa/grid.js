@@ -131,9 +131,16 @@ export function grid(cfg) {
       ? { ...column, type: column.typeFor(rec.src) }
       : column;
   };
-  const valueOf = (rec, key) => defaultedValue(
-    effectiveValue(rec, key, { owned, edits: gs.edits }),
-    columnFor(key, rec), today);
+  const valueOf = (rec, key) => {
+    const column = columnFor(key, rec);
+    // A derived column is recomputed from its neighbours every render, so
+    // editing what it depends on updates it immediately.
+    if (column?.derived) {
+      return column.derived((k) => valueOf(rec, k), rec.src);
+    }
+    return defaultedValue(
+      effectiveValue(rec, key, { owned, edits: gs.edits }), column, today);
+  };
 
   function setValue(rec, key, value) {
     if (overlaid(rec)) {
@@ -253,6 +260,9 @@ export function grid(cfg) {
     node.style.background = gs.colours[cid] ?? autoColour ?? "";
     node.style.fontWeight = style.bold ? "700" : "";
     node.style.fontStyle = style.italic ? "italic" : "";
+    node.style.textAlign = style.align ?? "";
+    node.style.fontSize = style.size ? `${style.size}px` : "";
+    node.style.color = style.colour ?? "";
   }
 
   function selectCell(rec, key, ev) {
@@ -298,19 +308,33 @@ export function grid(cfg) {
     const colours = { ...gs.colours };
     const styles = { ...gs.styles };
     for (const cid of selected) {
-      if ("colour" in patch) {
-        if (patch.colour) colours[cid] = patch.colour;
+      // `fill` is the cell background and lives apart from the text styles.
+      if ("fill" in patch) {
+        if (patch.fill) colours[cid] = patch.fill;
         else delete colours[cid];
       }
-      if ("bold" in patch || "italic" in patch) {
-        const next = { ...(styles[cid] ?? {}), ...patch };
-        delete next.colour;
-        if (next.bold || next.italic) styles[cid] = next;
+      const text = { ...patch };
+      delete text.fill;
+      if (Object.keys(text).length) {
+        const next = { ...(styles[cid] ?? {}), ...text };
+        // Drop keys set back to nothing so cleared formatting is not stored.
+        for (const [k, v] of Object.entries(next)) {
+          if (v === null || v === undefined || v === false || v === "") {
+            delete next[k];
+          }
+        }
+        if (Object.keys(next).length) styles[cid] = next;
         else delete styles[cid];
       }
     }
     persist({ colours, styles });
     redraw();
+  }
+
+  /** The style shared by the selection, for toggles that need current state. */
+  function selectionStyle() {
+    const first = [...selected][0];
+    return first ? (gs.styles[first] ?? {}) : {};
   }
 
   // ------------------------------------------------------------ toolbar
@@ -384,22 +408,52 @@ export function grid(cfg) {
         el("input", {
           type: "color",
           value: "#ffff00",
-          oninput: (e) => styleSelection({ colour: e.target.value }),
+          oninput: (e) => styleSelection({ fill: e.target.value }),
         }), "Fill"),
-      el("button", {
-        class: "action ghost",
-        onclick: () => styleSelection({ colour: null }),
-      }, "No fill"),
+      el("label", { class: "swatch", title: "Text colour" },
+        el("input", {
+          type: "color",
+          value: "#c00000",
+          oninput: (e) => styleSelection({ colour: e.target.value }),
+        }), "Text"),
       el("button", {
         class: "action ghost",
         style: "font-weight:700",
-        onclick: () => styleSelection({ bold: !(gs.styles[[...selected][0]]?.bold) }),
+        onclick: () => styleSelection({ bold: !selectionStyle().bold }),
       }, "B"),
       el("button", {
         class: "action ghost",
         style: "font-style:italic",
-        onclick: () => styleSelection({ italic: !(gs.styles[[...selected][0]]?.italic) }),
+        onclick: () => styleSelection({ italic: !selectionStyle().italic }),
       }, "I"),
+      el("span", { class: "sep" }),
+      // Alignment and text size, as asked for.
+      ...[["left", "⇤"], ["center", "≡"], ["right", "⇥"]].map(([align, glyph]) =>
+        el("button", {
+          class: "action ghost",
+          title: `Align ${align}`,
+          onclick: () => styleSelection({ align }),
+        }, glyph)),
+      el("select", {
+        class: "f",
+        style: "width:74px;margin:0",
+        title: "Text size",
+        onchange: (e) => {
+          styleSelection({ size: e.target.value ? Number(e.target.value) : null });
+          e.target.value = "";
+        },
+      },
+      el("option", { value: "" }, "Size"),
+      [10, 11, 12, 13, 14, 16, 18, 20, 24].map((n) =>
+        el("option", { value: n }, n))),
+      el("button", {
+        class: "action ghost",
+        title: "Clear fill and text formatting from the selection",
+        onclick: () => styleSelection({
+          fill: null, colour: null, bold: false, italic: false,
+          align: null, size: null,
+        }),
+      }, "Clear format"),
       el("span", { class: "sep" }),
       gs.hidden.length
         ? el("button", {

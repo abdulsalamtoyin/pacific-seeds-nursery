@@ -125,8 +125,16 @@ def _write_sheet(ws, sheet: dict) -> None:
         if not ref:
             continue
         r, c = ref
-        ws.cell(row=first_data_row + r, column=c + 1).font = Font(
-            bold=bool(style.get("bold")), italic=bool(style.get("italic")))
+        cell = ws.cell(row=first_data_row + r, column=c + 1)
+        size = style.get("size")
+        cell.font = Font(
+            bold=bool(style.get("bold")),
+            italic=bool(style.get("italic")),
+            size=float(size) if size else None,
+            color=_rgb(style.get("colour")),
+        )
+        if style.get("align") in {"left", "center", "right"}:
+            cell.alignment = Alignment(horizontal=style["align"])
 
     for i, width in enumerate(widths, start=1):
         try:
