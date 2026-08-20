@@ -12,18 +12,32 @@ import {
   spikeForRow, runDirection, bandForRow, parityForRow,
   serpentineByRange, serpentineTwoRowBands, assignSplits,
 } from "./nursery-algos.js";
+import * as store from "./store.js";
 
 const $ = (sel) => document.querySelector(sel);
-const STORE_KEY = "ps-nursery-workbook";
-
-const REPLACEMENT_HEADERS = [
-  "Stage", "Timestamp", "Plot", "Material ID", "Source ID",
-  "QR", "Reason", "Technician", "Split no.", "Status",
-];
 
 const STATUS_DEFAULT = "Waiting decision";
 const STATUS_OPTIONS = [STATUS_DEFAULT, "Changes made in PRISM"];
 const STAGE_OPTIONS = ["Packeting", "Planting"];
+
+const QR_ORIGINAL = "QR code (original entry)";
+const QR_REPLACED = "QR code (replaced entry)";
+
+// Timestamp, Material ID, Source ID, Technician and Split no. were dropped from
+// these tabs on request. The material fields are not lost — the export expands
+// each QR back into the full nine-column block the client's format wants, so
+// the tab stays short while the spreadsheet stays complete.
+const REPLACEMENT_COLUMNS = [
+  { key: "Stage", type: "select", options: STAGE_OPTIONS },
+  { key: "Plot", type: "text" },
+  { key: QR_ORIGINAL, type: "text", wide: true },
+  { key: QR_REPLACED, type: "text", wide: true },
+  { key: "Reason", type: "text" },
+  { key: "Status", type: "select", options: STATUS_OPTIONS },
+];
+
+const PLANTING_ERROR_COLUMNS =
+  REPLACEMENT_COLUMNS.filter((c) => c.key !== QR_REPLACED);
 
 const GROWTH_STAGES = [
   ["Seedling", "#fec000"], ["Vegetative", "#a9d08e"], ["Heading", "#ff6b6b"],
@@ -32,37 +46,23 @@ const GROWTH_STAGES = [
 ];
 
 // ---------------------------------------------------------------- state
+//
+// `state` is the *active* nursery, held in a rebindable binding so switching
+// nurseries is a reassignment plus a render. Views read `state.x` as before;
+// store.js owns the collection, the active pointer and persistence.
 
-const BLANK = {
-  code: "",
-  fileName: "",
-  types: [],
-  plantingDates: 1,
-  seedQty: "",
-  prism: [],          // rows from Nursery site
-  updatedPrism: [],   // rows from Updated nursery site
-  fieldMap: [],       // {dop, row, spike, run, qty}
-  replacements: [],   // objects keyed by REPLACEMENT_HEADERS
-  operations: {},     // "stage|group" -> text
-  comments: {},
-};
-
-let state = load();
+let state = store.activeNursery();
 let activeTab = "Home";
 
-function load() {
-  try {
-    const raw = localStorage.getItem(STORE_KEY);
-    return raw
-      ? { ...structuredClone(BLANK), ...JSON.parse(raw) }
-      : structuredClone(BLANK);
-  } catch {
-    return structuredClone(BLANK);
-  }
+function save() {
+  store.save();
 }
 
-function save() {
-  localStorage.setItem(STORE_KEY, JSON.stringify(state));
+/** Point `state` at whichever nursery is active now, then redraw. */
+function reloadActive() {
+  state = store.activeNursery();
+  activeTab = "Home";
+  render();
 }
 
 function isType(t) {
@@ -182,13 +182,54 @@ function render() {
 
 const VIEWS = {};
 
+// Nurseries no longer overwrite each other, so Home has to show which one is
+// open and let the user move between them.
+function nurseryPicker() {
+  const all = store.listNurseries();
+  const current = store.activeId();
+
+  const select = el("select", {
+    class: "f",
+    style: "min-width:260px",
+    onchange: (e) => { store.switchNursery(e.target.value); reloadActive(); },
+  }, all.map((n) => el("option",
+    n.id === current ? { value: n.id, selected: "selected" } : { value: n.id },
+    n.code ? `${n.code}${n.types.length ? ` — ${n.types.join(", ")}` : ""}`
+      : "(untitled nursery)")));
+
+  return el("div", { class: "nursery-bar" },
+    el("label", {}, "Open nursery"),
+    select,
+    el("button", { class: "action", onclick: initNursery }, "New nursery"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        store.duplicateNursery(store.activeId());
+        reloadActive();
+      },
+    }, "Duplicate"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        const name = state.code || "this untitled nursery";
+        if (!confirm(
+          `Delete ${name}? Its PRISM data, field map, replacements and ` +
+          "comments go with it. This cannot be undone.")) return;
+        store.deleteNursery(store.activeId());
+        reloadActive();
+      },
+    }, "Delete"));
+}
+
 VIEWS.Home = (main) => {
   main.append(...pageHead("Nursery Workflow",
     "Run each step in order. The same steps as the workbook's Home tab."));
 
+  main.append(nurseryPicker());
+
   if (!state.code) {
     main.append(el("div", { class: "note" },
-      "No nursery initialised yet — click ‘Initialise nursery’ above to set " +
+      "No nursery initialised yet — click ‘New nursery’ above to set " +
       "the code and nursery type."));
   }
 
@@ -205,9 +246,10 @@ VIEWS.Home = (main) => {
       "Enter planting dates and rows. Spike numbers and forward/reverse runs " +
       "are assigned automatically.",
       () => { activeTab = "Field Map"; render(); }],
-    ["4. Record replacements and errors",
-      "One log for both, split by Stage.",
-      () => { activeTab = "Replacements and Errors"; render(); }],
+    ["4. Record replacements and planting errors",
+      "Replacements carry an original and a replaced entry; planting errors " +
+      "carry the original entry only.",
+      () => { activeTab = "Replacements"; render(); }],
     ["5. Pull updated Nursery site from PRISM",
       "Import the refreshed export, then build the Fieldbook from it.",
       () => { activeTab = "Updated nursery site"; render(); }],
@@ -228,7 +270,9 @@ VIEWS.Home = (main) => {
     el("div", {}, "Packets in Nursery site"), el("div", {}, String(state.prism.length)),
     el("div", {}, "Rows assigned in Field Map"), el("div", {}, String(state.fieldMap.length)),
     el("div", {}, "Updated nursery site rows"), el("div", {}, String(state.updatedPrism.length)),
-    el("div", {}, "Replacements / errors logged"), el("div", {}, String(state.replacements.length))));
+    el("div", {}, "Replacements logged"), el("div", {}, String(state.replacements.length)),
+    el("div", {}, "Planting errors logged"), el("div", {}, String(state.plantingErrors.length)),
+    el("div", {}, "Nurseries stored"), el("div", {}, String(store.listNurseries().length))));
 };
 
 // Import the PRISM export straight from the downloaded file. Parsing happens
@@ -600,73 +644,92 @@ VIEWS["Nursery list"] = (main) => {
   draw();
 };
 
-VIEWS["Replacements and Errors"] = (main) => {
-  main.append(...pageHead("Replacements and Errors",
-    "One log for both. Stage marks which; Status defaults to “Waiting decision”."));
+// Replacements and Planting errors are the same log with a different column
+// set, so they share a renderer. `storeKey` picks which list is being edited.
+function logView(main, { title, subtitle, storeKey, columns }) {
+  main.append(...pageHead(title, subtitle));
+
+  const blankRow = () => Object.fromEntries(columns.map((c) => [
+    c.key,
+    c.key === "Stage" ? STAGE_OPTIONS[0]
+      : c.key === "Status" ? STATUS_DEFAULT : "",
+  ]));
 
   main.append(el("div", { class: "btnrow" },
     el("button", {
       class: "action",
-      onclick: () => {
-        state.replacements.push({
-          Stage: "Packeting",
-          Timestamp: new Date().toISOString().slice(0, 19).replace("T", " "),
-          Plot: "", "Material ID": "", "Source ID": "", QR: "",
-          Reason: "", Technician: "", "Split no.": "", Status: STATUS_DEFAULT,
-        });
-        save();
-        render();
-      },
+      onclick: () => { state[storeKey].push(blankRow()); save(); render(); },
     }, "Add row"),
-    el("button", { class: "action ghost", onclick: resolveSplits },
-      "Read QR → Split no.")));
+    el("button", {
+      class: "action ghost",
+      onclick: () => resolvePlots(storeKey),
+    }, "Read QR → Plot")));
 
-  if (!state.replacements.length) {
-    main.append(emptyState("No replacements or errors logged."));
+  if (!state[storeKey].length) {
+    main.append(emptyState(`Nothing logged on ${title}.`));
     return;
   }
 
   const head = el("tr", {},
-    REPLACEMENT_HEADERS.map((h) => el("th", {}, h)).concat([el("th", {}, "")]));
+    columns.map((c) => el("th", {}, c.key)).concat([el("th", {}, "")]));
 
-  const body = state.replacements.map((rec, i) => {
-    const cells = REPLACEMENT_HEADERS.map((h) => {
-      if (h === "Stage" || h === "Status") {
-        const opts = h === "Stage" ? STAGE_OPTIONS : STATUS_OPTIONS;
+  const body = state[storeKey].map((rec, i) => {
+    const cells = columns.map((c) => {
+      if (c.type === "select") {
         return el("td", {}, el("select", {
           class: "f",
-          onchange: (e) => { rec[h] = e.target.value; save(); },
-        }, opts.map((o) => el("option",
-          o === rec[h] ? { value: o, selected: "selected" } : { value: o }, o))));
+          onchange: (e) => { rec[c.key] = e.target.value; save(); },
+        }, c.options.map((o) => el("option",
+          o === rec[c.key] ? { value: o, selected: "selected" } : { value: o },
+          o))));
       }
       return el("td", {}, el("input", {
         class: "f",
-        value: rec[h] ?? "",
-        style: h === "QR" ? "min-width:340px" : "",
-        oninput: (e) => { rec[h] = e.target.value; save(); },
+        value: rec[c.key] ?? "",
+        // The QR payload is long; give it room so the column fits its contents.
+        style: c.wide ? "min-width:340px" : "",
+        oninput: (e) => { rec[c.key] = e.target.value; save(); },
       }));
     });
     cells.push(el("td", {}, el("button", {
       class: "action ghost",
-      onclick: () => { state.replacements.splice(i, 1); save(); render(); },
+      onclick: () => { state[storeKey].splice(i, 1); save(); render(); },
     }, "Remove")));
     return el("tr", {}, cells);
   });
 
   main.append(el("div", { class: "scroll" },
-    el("table", {}, el("thead", {}, head), el("tbody", {}, body))));
-};
+    el("table", { class: "fit" },
+      el("thead", {}, head), el("tbody", {}, body))));
+}
 
-function resolveSplits() {
+VIEWS.Replacements = (main) => logView(main, {
+  title: "Replacements",
+  subtitle: "Scan the original entry and its replacement. The export expands " +
+    "each QR into the full entry block.",
+  storeKey: "replacements",
+  columns: REPLACEMENT_COLUMNS,
+});
+
+VIEWS["Planting errors"] = (main) => logView(main, {
+  title: "Planting errors",
+  subtitle: "Original entry only — nothing was planted in its place.",
+  storeKey: "plantingErrors",
+  columns: PLANTING_ERROR_COLUMNS,
+});
+
+// The QR payload leads with the plot, so a scan can fill the Plot column.
+// A value matching no plot is left blank and counted rather than guessed at.
+function resolvePlots(storeKey) {
   let resolved = 0;
   let unresolved = 0;
-  for (const rec of state.replacements) {
-    const payload = String(rec.QR ?? "").trim();
+  for (const rec of state[storeKey]) {
+    const payload = String(rec[QR_ORIGINAL] ?? "").trim();
     if (!payload) continue;
     const plot = payload.split(",")[0].trim();
     const hit = state.prism.find((r) => plotOf(r) === plot);
     if (hit) {
-      rec["Split no."] = splitForRow(num(hit.Row));
+      rec.Plot = plotOf(hit);
       resolved += 1;
     } else {
       unresolved += 1;
@@ -677,7 +740,7 @@ function resolveSplits() {
   alert(unresolved
     ? `${resolved} scan(s) resolved.\n${unresolved} QR value(s) matched no ` +
       "plot — those rows were left blank."
-    : `${resolved} scan(s) resolved to a split.`);
+    : `${resolved} scan(s) resolved to a plot.`);
 }
 
 VIEWS.Fieldbook = (main) => {
@@ -815,32 +878,35 @@ function generateAll() {
   render();
 }
 
+// Initialising always opens a *new* nursery. Editing the open one is what the
+// Rename action is for — before, this overwrote whatever was already loaded.
 function initNursery() {
-  const code = prompt("Enter the nursery code (e.g. AUGT1-26S-IMI):",
-    state.code || "");
+  const code = prompt("Enter the nursery code (e.g. AUGT1-26S-IMI):", "");
   if (!code) return;
   const types = prompt(
     "Nursery type(s) — comma separated.\nOptions: " + SPEC.nursery_types.join(", "),
-    state.types.join(", ") || "Selection");
+    "Selection");
   if (!types) return;
   const fileName = prompt("File name for this workbook:", code);
   if (fileName === null) return;
 
-  state.code = code.trim();
-  state.types = types.split(",").map((s) => s.trim()).filter(Boolean);
-  state.fileName = fileName.trim();
-  save();
-  activeTab = "Home";
-  render();
+  store.createNursery({
+    code: code.trim(),
+    types: types.split(",").map((s) => s.trim()).filter(Boolean),
+    fileName: fileName.trim(),
+  });
+  reloadActive();
 }
 
 $("#btnInit").addEventListener("click", initNursery);
 $("#btnReset").addEventListener("click", () => {
-  if (!confirm("Clear all workbook data on this machine?")) return;
-  state = structuredClone(BLANK);
-  save();
-  activeTab = "Home";
-  render();
+  const name = state.code || "this untitled nursery";
+  if (!confirm(
+    `Clear the data in ${name}? Other nurseries on this machine are kept.`)) {
+    return;
+  }
+  store.deleteNursery(store.activeId());
+  reloadActive();
 });
 
 render();

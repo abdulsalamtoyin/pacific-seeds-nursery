@@ -141,6 +141,16 @@
     width: 100%; max-width: 420px; padding: 7px 9px;
     border: 1px solid var(--line); border-radius: 5px; font-size: 13px;
   }
+  /* Which nursery is open, and how to move between them. */
+  .nursery-bar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+    padding: 12px 14px; margin: 0 0 18px;
+    border: 1px solid var(--line); border-radius: 8px; background: #fff;
+  }
+  .nursery-bar label { font-weight: 600; font-size: 13px; color: var(--ink-soft); }
+  .nursery-bar select.f { margin: 0; }
+  /* Columns sized to their contents, for the replacement logs. */
+  table.fit td input.f { min-width: 120px; }
   .kv { display: grid; grid-template-columns: 260px 1fr; max-width: 760px; }
   .kv div { border-bottom: 1px solid var(--line); padding: 6px 8px; }
   .kv div:nth-child(odd) { color: var(--ink-soft); }
