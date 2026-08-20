@@ -4,8 +4,9 @@
 // excel_workflow/spec/nursery_spec.json. Edit the JSON and re-run
 // the generator; any manual change here is overwritten.
 //
-// This is the same spec the Excel builder and SpecConstants.bas read,
-// so the desktop app's tabs cannot drift from the workbook's.
+// This is the spec with app_overrides applied — what the desktop app
+// sees. It matches tabs_for(..., spec=app_spec()) value for value,
+// which tests/test_js_parity.py checks.
 
 export const SPEC = {
   "always_first": [
@@ -21,7 +22,8 @@ export const SPEC = {
     "Nursery data",
     "Packet Prep",
     "Nursery list",
-    "Replacements and Errors",
+    "Replacements",
+    "Planting errors",
     "Updated nursery site",
     "Fieldbook",
     "Operations",
@@ -35,7 +37,7 @@ export const SPEC = {
       "types": [
         "AB"
       ],
-      "before": "Operations"
+      "after": "Fieldbook"
     }
   },
   "extras": {
@@ -98,8 +100,38 @@ export const SPEC = {
       "hidden": false
     },
     {
+      "name": "S1 Month",
+      "width": 8.43,
+      "hidden": false
+    },
+    {
       "name": "S 2",
       "width": 5.57,
+      "hidden": false
+    },
+    {
+      "name": "S2 Month",
+      "width": 8.43,
+      "hidden": false
+    },
+    {
+      "name": "S 3",
+      "width": 5.14,
+      "hidden": false
+    },
+    {
+      "name": "S3 Month",
+      "width": 8.43,
+      "hidden": false
+    },
+    {
+      "name": "S 4",
+      "width": 5.14,
+      "hidden": false
+    },
+    {
+      "name": "S4 Month",
+      "width": 8.43,
       "hidden": false
     },
     {
@@ -164,11 +196,36 @@ export const SPEC = {
     "print_title_rows": "$1:$1",
     "center_footer": "&P/&N",
     "right_header": "filename"
+  },
+  "_app_overrides_note": [
+    "Desktop-app-only changes from 'Toyin- Updated app changes.docx'.",
+    "Merged by app_spec() and by gen_spec_constants.render_js(); ignored by",
+    "load_spec() consumers, so the Excel workbook is unaffected. Delete this",
+    "block once the VBA carries the same changes."
+  ],
+  "nursery_data_defaults": {
+    "Planter": "Almaco Precision Planter",
+    "Seeds/side": "34",
+    "Plot length": "4.5m",
+    "Alley way spacing": "0.75m"
   }
 };
 
 export function defaultTabs() {
   return [...SPEC.default_tabs];
+}
+
+// Mirrors _anchor() in excel_workflow/spec/loader.py. A rule naming
+// both anchors, or neither, has no defensible placement.
+function anchorOf(name, rule) {
+  const hasBefore = 'before' in rule;
+  const hasAfter = 'after' in rule;
+  if (hasBefore === hasAfter) {
+    throw new Error(
+      `conditional rule '${name}' must set exactly one of ` +
+      `'before' or 'after'`);
+  }
+  return hasBefore ? ['before', rule.before] : ['after', rule.after];
 }
 
 // Mirrors tabs_for() in excel_workflow/spec/loader.py.
@@ -180,16 +237,23 @@ export function tabsFor(nurseryTypes, plantingDates) {
   const selected = new Set(nurseryTypes);
   const hits = (types) => types.some((t) => selected.has(t));
 
+  const entries = Object.entries(SPEC.conditional);
+  const anchors = new Map(
+    entries.map(([name, rule]) => [name, anchorOf(name, rule)]));
+  const matching = (position, name) => entries
+    .filter(([cond, rule]) => anchors.get(cond)[0] === position
+      && anchors.get(cond)[1] === name && hits(rule.types))
+    .map(([cond]) => cond);
+
   const tabs = [...SPEC.always_first, ...SPEC.hidden];
   for (const name of SPEC.default_tabs) {
-    for (const [condName, rule] of Object.entries(SPEC.conditional)) {
-      if (rule.before === name && hits(rule.types)) tabs.push(condName);
-    }
+    tabs.push(...matching('before', name));
     if (name in SPEC.fan_out) {
       for (let i = 1; i <= plantingDates; i++) tabs.push(`${name} ${i}`);
     } else {
       tabs.push(name);
     }
+    tabs.push(...matching('after', name));
   }
   for (const [tab, types] of Object.entries(SPEC.extras)) {
     if (hits(types)) tabs.push(tab);

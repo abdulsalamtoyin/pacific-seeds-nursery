@@ -3,9 +3,13 @@
 Tab names and ordering here come from Workbook changes.docx; if these tests
 and the document disagree, the document wins.
 """
+import copy
+
 import pytest
 
-from excel_workflow.spec.loader import default_tabs, load_spec, tabs_for
+from excel_workflow.spec.loader import (
+    app_spec, default_tabs, load_spec, tabs_for,
+)
 
 
 def test_default_tabs_are_in_the_specified_order():
@@ -81,4 +85,86 @@ def test_tabs_for_rejects_zero_planting_dates():
 
 def test_no_duplicate_tab_names():
     tabs = tabs_for(["AB", "Hybrid", "Other"], planting_dates=3)
+    assert len(tabs) == len(set(tabs))
+
+
+# --------------------------------------------------------------- app_overrides
+#
+# The desktop app's tabs moved ahead of the workbook's. Rather than fork the
+# spec, the app's differences live in an app_overrides block that only the
+# desktop side merges — so the workbook keeps building exactly as before.
+
+
+def test_base_spec_still_has_the_combined_replacements_tab():
+    """The workbook builder must not see the app's tab split."""
+    assert "Replacements and Errors" in default_tabs()
+    assert "Planting errors" not in tabs_for(["AB"], planting_dates=1)
+
+
+def test_app_spec_splits_replacements_from_planting_errors():
+    tabs = tabs_for(["Selection"], planting_dates=1, spec=app_spec())
+    assert "Replacements and Errors" not in tabs
+    assert tabs.index("Planting errors") == tabs.index("Replacements") + 1
+
+
+def test_app_spec_moves_date_recording_after_fieldbook():
+    tabs = tabs_for(["AB"], planting_dates=1, spec=app_spec())
+    assert tabs.index("Date recording") == tabs.index("Fieldbook") + 1
+
+
+def test_app_spec_still_hides_date_recording_from_non_ab():
+    tabs = tabs_for(["Selection"], planting_dates=1, spec=app_spec())
+    assert "Date recording" not in tabs
+
+
+def test_app_spec_carries_four_selection_columns_and_their_months():
+    names = [c["name"] for c in app_spec()["date_recording_columns"]]
+    for expected in ["S 1", "S1 Month", "S 2", "S2 Month",
+                     "S 3", "S3 Month", "S 4", "S4 Month"]:
+        assert expected in names, f"{expected} missing from {names}"
+
+
+def test_app_spec_carries_the_nursery_data_defaults():
+    defaults = app_spec()["nursery_data_defaults"]
+    assert defaults["Planter"] == "Almaco Precision Planter"
+    assert defaults["Seeds/side"] == "34"
+    assert defaults["Plot length"] == "4.5m"
+    assert defaults["Alley way spacing"] == "0.75m"
+
+
+def test_app_overrides_do_not_leak_into_the_merged_spec():
+    assert "app_overrides" not in app_spec()
+
+
+# ------------------------------------------------------------ anchor placement
+
+
+def _spec_with_rule(rule: dict) -> dict:
+    spec = copy.deepcopy(app_spec())
+    spec["conditional"] = {"Date recording": rule}
+    return spec
+
+
+def test_before_anchor_places_the_tab_immediately_before():
+    spec = _spec_with_rule({"types": ["AB"], "before": "Operations"})
+    tabs = tabs_for(["AB"], planting_dates=1, spec=spec)
+    assert tabs.index("Date recording") == tabs.index("Operations") - 1
+
+
+def test_a_rule_with_both_anchors_is_rejected():
+    spec = _spec_with_rule(
+        {"types": ["AB"], "before": "Operations", "after": "Fieldbook"})
+    with pytest.raises(ValueError, match="exactly one of 'before' or 'after'"):
+        tabs_for(["AB"], planting_dates=1, spec=spec)
+
+
+def test_a_rule_with_no_anchor_is_rejected():
+    spec = _spec_with_rule({"types": ["AB"]})
+    with pytest.raises(ValueError, match="exactly one of 'before' or 'after'"):
+        tabs_for(["AB"], planting_dates=1, spec=spec)
+
+
+def test_app_spec_has_no_duplicate_tab_names():
+    tabs = tabs_for(["AB", "Hybrid", "Other"], planting_dates=3,
+                    spec=app_spec())
     assert len(tabs) == len(set(tabs))

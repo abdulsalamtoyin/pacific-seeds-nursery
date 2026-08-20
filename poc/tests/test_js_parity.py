@@ -118,11 +118,15 @@ def test_splits_match_python(js_output):
     (["Selection", "AB", "Hybrid", "Other"], 4),
 ])
 def test_tabs_for_matches_python(tmp_path, types, dates):
-    """The generated JS spec must produce the same sheet list as the loader."""
+    """The generated JS spec must produce the same sheet list as the loader.
+
+    The app's spec is the base plus app_overrides, so the comparison is against
+    tabs_for(..., spec=app_spec()) — the same thing render_js() emits.
+    """
     if shutil.which("node") is None:
         pytest.skip("node not installed")
 
-    from excel_workflow.spec.loader import tabs_for
+    from excel_workflow.spec.loader import app_spec, tabs_for
 
     spec_js = PWA_DIR / "nursery-spec.js"
     assert spec_js.exists(), "run: python -m excel_workflow.gen_spec_constants"
@@ -137,7 +141,30 @@ def test_tabs_for_matches_python(tmp_path, types, dates):
                           text=True, timeout=30)
     if proc.returncode != 0:
         pytest.fail(f"node driver failed:\n{proc.stderr}")
-    assert json.loads(proc.stdout) == tabs_for(types, dates)
+    assert json.loads(proc.stdout) == tabs_for(types, dates, spec=app_spec())
+
+
+def test_js_rejects_a_conditional_with_two_anchors(tmp_path):
+    """anchorOf() must refuse the same rule the Python _anchor() refuses."""
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+
+    spec_js = PWA_DIR / "nursery-spec.js"
+    driver = tmp_path / "anchors.mjs"
+    driver.write_text(
+        f"import {{ SPEC, tabsFor }} from {str(spec_js)!r};\n"
+        "SPEC.conditional['Date recording'] = "
+        "{ types: ['AB'], before: 'Operations', after: 'Fieldbook' };\n"
+        "try { tabsFor(['AB'], 1); console.log('NO ERROR'); }\n"
+        "catch (e) { console.log(e.message); }\n",
+        encoding="utf-8",
+    )
+    out = subprocess.run(["node", str(driver)], capture_output=True,
+                         text=True, timeout=30).stdout.strip()
+    # Same wording as the Python ValueError, so either side reads the same.
+    assert out == (
+        "conditional rule 'Date recording' must set exactly one of "
+        "'before' or 'after'")
 
 
 def test_js_rejects_overlapping_splits(tmp_path):

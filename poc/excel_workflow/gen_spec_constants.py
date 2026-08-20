@@ -12,7 +12,7 @@ import json
 import re
 from pathlib import Path
 
-from excel_workflow.spec.loader import load_spec
+from excel_workflow.spec.loader import app_spec, load_spec
 
 OUT_PATH = Path(__file__).resolve().parent / "vba" / "SpecConstants.bas"
 JS_OUT_PATH = (Path(__file__).resolve().parent.parent
@@ -68,8 +68,12 @@ def render_js() -> str:
 
     The app has to open from the filesystem as well as over HTTP, so the spec
     ships as a module rather than something fetched at runtime.
+
+    This emits app_spec() — the base spec with app_overrides merged — because
+    the desktop app's tabs have moved ahead of the workbook's. Parity with the
+    Python is still enforced, against tabs_for(..., spec=app_spec()).
     """
-    spec = load_spec()
+    spec = app_spec()
     body = json.dumps(spec, indent=2, ensure_ascii=False)
     return (
         "// GENERATED FILE, DO NOT EDIT\n"
@@ -78,13 +82,27 @@ def render_js() -> str:
         "// excel_workflow/spec/nursery_spec.json. Edit the JSON and re-run\n"
         "// the generator; any manual change here is overwritten.\n"
         "//\n"
-        "// This is the same spec the Excel builder and SpecConstants.bas read,\n"
-        "// so the desktop app's tabs cannot drift from the workbook's.\n"
+        "// This is the spec with app_overrides applied — what the desktop app\n"
+        "// sees. It matches tabs_for(..., spec=app_spec()) value for value,\n"
+        "// which tests/test_js_parity.py checks.\n"
         "\n"
         f"export const SPEC = {body};\n"
         "\n"
         "export function defaultTabs() {\n"
         "  return [...SPEC.default_tabs];\n"
+        "}\n"
+        "\n"
+        "// Mirrors _anchor() in excel_workflow/spec/loader.py. A rule naming\n"
+        "// both anchors, or neither, has no defensible placement.\n"
+        "function anchorOf(name, rule) {\n"
+        "  const hasBefore = 'before' in rule;\n"
+        "  const hasAfter = 'after' in rule;\n"
+        "  if (hasBefore === hasAfter) {\n"
+        "    throw new Error(\n"
+        "      `conditional rule '${name}' must set exactly one of ` +\n"
+        "      `'before' or 'after'`);\n"
+        "  }\n"
+        "  return hasBefore ? ['before', rule.before] : ['after', rule.after];\n"
         "}\n"
         "\n"
         "// Mirrors tabs_for() in excel_workflow/spec/loader.py.\n"
@@ -96,16 +114,23 @@ def render_js() -> str:
         "  const selected = new Set(nurseryTypes);\n"
         "  const hits = (types) => types.some((t) => selected.has(t));\n"
         "\n"
+        "  const entries = Object.entries(SPEC.conditional);\n"
+        "  const anchors = new Map(\n"
+        "    entries.map(([name, rule]) => [name, anchorOf(name, rule)]));\n"
+        "  const matching = (position, name) => entries\n"
+        "    .filter(([cond, rule]) => anchors.get(cond)[0] === position\n"
+        "      && anchors.get(cond)[1] === name && hits(rule.types))\n"
+        "    .map(([cond]) => cond);\n"
+        "\n"
         "  const tabs = [...SPEC.always_first, ...SPEC.hidden];\n"
         "  for (const name of SPEC.default_tabs) {\n"
-        "    for (const [condName, rule] of Object.entries(SPEC.conditional)) {\n"
-        "      if (rule.before === name && hits(rule.types)) tabs.push(condName);\n"
-        "    }\n"
+        "    tabs.push(...matching('before', name));\n"
         "    if (name in SPEC.fan_out) {\n"
         "      for (let i = 1; i <= plantingDates; i++) tabs.push(`${name} ${i}`);\n"
         "    } else {\n"
         "      tabs.push(name);\n"
         "    }\n"
+        "    tabs.push(...matching('after', name));\n"
         "  }\n"
         "  for (const [tab, types] of Object.entries(SPEC.extras)) {\n"
         "    if (hits(types)) tabs.push(tab);\n"

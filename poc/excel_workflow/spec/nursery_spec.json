@@ -76,5 +76,56 @@
     "print_title_rows": "$1:$1",
     "center_footer": "&P/&N",
     "right_header": "filename"
+  },
+
+  "_app_overrides_note": [
+    "Desktop-app-only changes from 'Toyin- Updated app changes.docx'.",
+    "Merged by app_spec() and by gen_spec_constants.render_js(); ignored by",
+    "load_spec() consumers, so the Excel workbook is unaffected. Delete this",
+    "block once the VBA carries the same changes."
+  ],
+  "app_overrides": {
+    "default_tabs": [
+      "Nursery site",
+      "Material Map",
+      "Field Map",
+      "Nursery data",
+      "Packet Prep",
+      "Nursery list",
+      "Replacements",
+      "Planting errors",
+      "Updated nursery site",
+      "Fieldbook",
+      "Operations",
+      "Comments"
+    ],
+    "conditional": {
+      "Date recording": {"types": ["AB"], "after": "Fieldbook"}
+    },
+    "date_recording_columns": [
+      {"name": "Group", "width": 6.29, "hidden": true},
+      {"name": "Range", "width": 6.86, "hidden": false},
+      {"name": "Row", "width": 5.43, "hidden": false},
+      {"name": "O/E", "width": 9.14, "hidden": true},
+      {"name": "S 1", "width": 5.14, "hidden": false},
+      {"name": "S1 Month", "width": 8.43, "hidden": false},
+      {"name": "S 2", "width": 5.57, "hidden": false},
+      {"name": "S2 Month", "width": 8.43, "hidden": false},
+      {"name": "S 3", "width": 5.14, "hidden": false},
+      {"name": "S3 Month", "width": 8.43, "hidden": false},
+      {"name": "S 4", "width": 5.14, "hidden": false},
+      {"name": "S4 Month", "width": 8.43, "hidden": false},
+      {"name": "Material ID", "width": 21.43, "hidden": false},
+      {"name": "Source ID", "width": 28.57, "hidden": false},
+      {"name": "Gen", "width": 5.14, "hidden": false},
+      {"name": "CMS", "width": 4.71, "hidden": false},
+      {"name": "In. Code", "width": 8.43, "hidden": false}
+    ],
+    "nursery_data_defaults": {
+      "Planter": "Almaco Precision Planter",
+      "Seeds/side": "34",
+      "Plot length": "4.5m",
+      "Alley way spacing": "0.75m"
+    }
   }
 }
