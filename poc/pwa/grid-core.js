@@ -44,6 +44,26 @@ export function effectiveValue(rec, key, { owned = false, edits = {} } = {}) {
   return rec.src?.[key] ?? "";
 }
 
+/** Today as YYYY-MM-DD — what an <input type="date"> expects. */
+export function todayISO(now = new Date()) {
+  const pad = (n) => String(n).padStart(2, "0");
+  // Deliberately local, not toISOString(): a nursery recording an evening date
+  // in Australia must not have UTC roll it back to yesterday.
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
+ * A blank date cell reads as today.
+ *
+ * Dates are picked from a calendar and default to the current date. Applying
+ * that here rather than in the renderer means the value shown, filtered,
+ * sorted and exported are all the same value.
+ */
+export function defaultedValue(value, column, today) {
+  if (value !== "" && value !== null && value !== undefined) return value;
+  return column?.type === "date" ? today : (value ?? "");
+}
+
 /** True when this cell carries a hand-edit over a computed value. */
 export function isEditedCell(rec, key, { owned = false, edits = {} } = {}) {
   return isOverlaid(rec, owned) && !!(edits[rec.key] && key in edits[rec.key]);

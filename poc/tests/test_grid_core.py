@@ -218,6 +218,88 @@ def test_header_clicks_cycle_asc_desc_off(tmp_path):
     assert out["other"] == {"key": "Range", "dir": "asc"}
 
 
+# ------------------------------------------------------------------ dates
+#
+# Dates are picked from a calendar and a blank one reads as today. Resolving
+# that in the core rather than in the renderer is what keeps the value shown,
+# filtered, sorted and exported identical.
+
+
+def test_today_is_local_not_utc(tmp_path):
+    """An evening date in Australia must not roll back a day through UTC."""
+    out = run_js(tmp_path, """
+      // 2026-08-20 23:30 local time, whatever the host zone is.
+      const d = new Date(2026, 7, 20, 23, 30);
+      console.log(JSON.stringify({ today: core.todayISO(d) }));
+    """)
+    assert out == {"today": "2026-08-20"}
+
+
+def test_today_pads_month_and_day(tmp_path):
+    out = run_js(tmp_path, """
+      console.log(JSON.stringify({
+        today: core.todayISO(new Date(2026, 0, 5)),
+      }));
+    """)
+    assert out == {"today": "2026-01-05"}
+
+
+def test_blank_date_cell_reads_as_today(tmp_path):
+    out = run_js(tmp_path, """
+      const col = { key: "Tagging date", type: "date" };
+      console.log(JSON.stringify({
+        blank: core.defaultedValue("", col, "2026-08-20"),
+        missing: core.defaultedValue(undefined, col, "2026-08-20"),
+      }));
+    """)
+    assert out == {"blank": "2026-08-20", "missing": "2026-08-20"}
+
+
+def test_a_date_already_set_is_left_alone(tmp_path):
+    out = run_js(tmp_path, """
+      const col = { key: "Tagging date", type: "date" };
+      console.log(JSON.stringify({
+        v: core.defaultedValue("2026-03-01", col, "2026-08-20"),
+      }));
+    """)
+    assert out == {"v": "2026-03-01"}
+
+
+def test_non_date_columns_are_not_defaulted(tmp_path):
+    """Only date columns get today — a blank Reason stays blank."""
+    out = run_js(tmp_path, """
+      console.log(JSON.stringify({
+        text: core.defaultedValue("", { key: "Reason", type: "text" }, "2026-08-20"),
+        unknown: core.defaultedValue("", undefined, "2026-08-20"),
+      }));
+    """)
+    assert out == {"text": "", "unknown": ""}
+
+
+def test_defaulted_dates_sort_and_filter_with_the_rest(tmp_path):
+    """A blank date must group with today, not float to the end as empty."""
+    out = run_js(tmp_path, """
+      const col = { key: "DOP", type: "date" };
+      const recs = [
+        { key: "a", src: { DOP: "2026-01-05" } },
+        { key: "b", src: { DOP: "" } },
+        { key: "c", src: { DOP: "2026-12-31" } },
+      ];
+      const v = (rec, key) =>
+        core.defaultedValue(
+          core.effectiveValue(rec, key, { owned: false, edits: {} }),
+          col, "2026-08-20");
+      const sorted = core.sortRecords(recs, { key: "DOP", dir: "asc" }, v);
+      const filtered = core.filterRecords(recs, { DOP: ["2026-08-20"] }, v);
+      console.log(JSON.stringify({
+        sorted: sorted.map((r) => r.key),
+        filtered: filtered.map((r) => r.key),
+      }));
+    """)
+    # The blank row sorts into today's position, and is findable as today.
+    assert out == {"sorted": ["a", "b", "c"], "filtered": ["b"]}
+
+
 # ------------------------------------------------------------------ rack order
 
 

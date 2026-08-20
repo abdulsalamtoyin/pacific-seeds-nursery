@@ -21,8 +21,8 @@
 
 import * as store from "./store.js";
 import {
-  compare, effectiveValue, filterRecords, isEditedCell, isOverlaid,
-  nextSort, orphanKeys, sortRecords,
+  compare, defaultedValue, effectiveValue, filterRecords, isEditedCell,
+  isOverlaid, nextSort, orphanKeys, sortRecords, todayISO,
 } from "./grid-core.js";
 
 function el(tag, attrs = {}, ...kids) {
@@ -117,10 +117,16 @@ export function grid(cfg) {
   // A user-added row and an owned row hold their own values; a computed row's
   // hand-edits live in the overlay. The rules themselves are in grid-core.js.
   const overlaid = (rec) => isOverlaid(rec, owned);
-  const valueOf = (rec, key) =>
-    effectiveValue(rec, key, { owned, edits: gs.edits });
   const isEdited = (rec, key) =>
     isEditedCell(rec, key, { owned, edits: gs.edits });
+
+  // Blank date cells read as today. Resolving that here — rather than only
+  // when painting the input — keeps the value shown, filtered, sorted and
+  // exported identical.
+  const today = todayISO();
+  const columnFor = (key) => allColumns().find((c) => c.key === key);
+  const valueOf = (rec, key) => defaultedValue(
+    effectiveValue(rec, key, { owned, edits: gs.edits }), columnFor(key), today);
 
   function setValue(rec, key, value) {
     if (overlaid(rec)) {

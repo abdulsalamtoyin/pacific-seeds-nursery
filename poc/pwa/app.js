@@ -14,6 +14,7 @@ import {
 } from "./nursery-algos.js";
 import * as store from "./store.js";
 import { grid } from "./grid.js";
+import { todayISO } from "./grid-core.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -106,6 +107,47 @@ function pageHead(title, subtitle) {
 
 function emptyState(msg) {
   return el("div", { class: "empty" }, msg);
+}
+
+/**
+ * Ask for a date with a calendar, not a typed string.
+ *
+ * A typed date could arrive as 3/4/26, 03-Apr-26 or 2026-04-03, and the tabs
+ * that group by planting date would treat those as three different dates. The
+ * picker removes the ambiguity, and opens on today.
+ *
+ * @returns {Promise<string|null>} ISO YYYY-MM-DD, or null if cancelled.
+ */
+function pickDate(label, initial) {
+  return new Promise((resolve) => {
+    const input = el("input", {
+      class: "f",
+      type: "date",
+      value: initial || todayISO(),
+    });
+
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal" },
+        el("h3", {}, label),
+        input,
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => close(input.value || null),
+          }, "OK"),
+          el("button", {
+            class: "action ghost",
+            onclick: () => close(null),
+          }, "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+    input.focus();
+  });
 }
 
 function num(v) {
@@ -476,7 +518,7 @@ VIEWS["Field Map"] = (main) => {
   }
 };
 
-function fieldMapWizard() {
+async function fieldMapWizard() {
   if (!state.prism.length) {
     alert("Import Nursery site data first.");
     return;
@@ -485,13 +527,15 @@ function fieldMapWizard() {
     String(state.plantingDates || 2)));
   if (n < 1) return;
 
-  const qty = prompt("Seed quantity per plot:", state.seedQty || "");
+  const qty = prompt("Seed quantity per plot (grams):", state.seedQty || "");
   if (qty === null) return;
 
   const dopRows = [];
   const dops = [];
   for (let i = 1; i <= n; i++) {
-    const dop = prompt(`Date of planting ${i} (e.g. 25-Feb-2026):`);
+    // Picked from a calendar so every planting date is the same ISO shape —
+    // the Packet Prep split and the Nursery data rows both group on it.
+    const dop = await pickDate(`Date of planting ${i}`, dops[i - 2]);
     if (!dop) return;
     const rowsCsv = prompt(`Rows for planting date ${i} (comma separated):`);
     if (!rowsCsv) return;
