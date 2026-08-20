@@ -24,6 +24,8 @@ export const BLANK_NURSERY = {
   fieldMap: [],        // {dop, row, spike, run, qty}
   nurseryData: {},     // label -> {value, comment}
   mapFields: [],       // which fields Material Map shows in each cell
+  dateRecording: {},   // "<range>_<row>" -> {"S 1": "28", ...}
+  recordingStart: "",  // ISO date the selection passes started from
   replacements: [],
   plantingErrors: [],
   operations: {},      // "stage|group" -> text

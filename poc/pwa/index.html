@@ -154,6 +154,25 @@
   table.grid td { white-space: pre-line; text-align: center; vertical-align: middle; }
   table.grid td.hdr { font-weight: 700; background: #f2f4f7; }
 
+  /* Days 1-31 as a tick grid, for pulling bags. */
+  .day-grid {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px;
+    margin: 4px 0 2px;
+  }
+  .day-box {
+    display: flex; align-items: center; justify-content: center; gap: 3px;
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 2px;
+    font-size: 12px; cursor: pointer;
+  }
+  .day-box input { margin: 0; }
+
+  /* Selection trend chart. */
+  .chart-wrap {
+    border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+    background: #fff; margin: 8px 0 16px;
+  }
+  .chart-legend { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 8px; }
+
   /* ---- date picker modal ---- */
   .modal-backdrop {
     position: fixed; inset: 0; z-index: 60; display: flex;

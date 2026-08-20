@@ -11,6 +11,7 @@ import { SPEC, tabsFor } from "./nursery-spec.js";
 import {
   spikeForRow, runDirection, bandForRow, parityForRow,
   serpentineByRange, serpentineTwoRowBands, assignSplits,
+  assignMonth, trendCounts,
 } from "./nursery-algos.js";
 import * as store from "./store.js";
 import { grid } from "./grid.js";
@@ -290,11 +291,6 @@ function splitForRow(row) {
   if (!hit) return 1;      // before the wizard runs, everything is split 1
   const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
   return dops.indexOf(hit.dop) + 1;
-}
-
-function isRecurrent(gen) {
-  const g = String(gen ?? "").toUpperCase();
-  return g.startsWith("BC") || /^F\d/.test(g);
 }
 
 function duplicateSet(values) {
@@ -1464,53 +1460,453 @@ function captureFieldbook() {
     `${state.snapshots.length} capture(s) stored for this nursery.`);
 }
 
+// Four passes through the nursery. The month is not recorded per cell — the
+// crew writes a bare day — so it is derived from a start date, as in the VBA.
+const SELECTION_COLUMNS = ["S 1", "S 2", "S 3", "S 4"];
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** A-lines out of the fieldbook, which is what date recording works from. */
+function aLineRows() {
+  return fieldbookRows().filter((r) => String(r.CMS).toUpperCase() === "A");
+}
+
 VIEWS["Date recording"] = (main) => {
   main.append(...pageHead("Date recording",
-    "AB nurseries only. S 1 and S 2 hold day-of-month numbers; " +
-    "the month is applied separately."));
+    "A-lines from the Fieldbook. S 1 to S 4 hold day-of-month numbers; " +
+    "the month is worked out from the recording start date."));
 
-  const src = state.prism.filter((r) => isRecurrent(r.Generation));
-  if (!src.length) {
-    main.append(emptyState("No recurrent (BC*/Fn) packets in Nursery site."));
+  if (!state.updatedPrism.length) {
+    main.append(emptyState(
+      "Import the updated PRISM export on the ‘Updated nursery site’ tab first."));
     return;
   }
 
-  let mode = "range";
+  const src = aLineRows();
+  if (!src.length) {
+    main.append(emptyState(
+      "No A-lines in the Fieldbook — nothing to record selections against."));
+    return;
+  }
+
+  let mode = "vertical";
   const holder = el("div");
+
   const draw = () => {
-    holder.replaceChildren();
     const plots = src.map((r) => [num(r.Range), num(r.Row)]);
-    const order = mode === "band"
+    // Vertical goes between two rows at a time; horizontal walks bay by bay.
+    const order = mode === "vertical"
       ? serpentineTwoRowBands(plots)
       : serpentineByRange(plots);
-    const byPlot = new Map(src.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+    const byPlot = new Map(src.map((r) => [`${r.Range}:${r.Row}`, r]));
+
     const rows = order.map(([rng, row]) => {
       const r = byPlot.get(`${rng}:${row}`) || {};
-      return [bandForRow(row), rng, row, parityForRow(row), "", "",
-        r["Material ID"], r["Source ID"], r.Generation, r["CMS reaction"],
-        r["Inbred Code"]];
+      const stored = state.dateRecording?.[`${rng}_${row}`] ?? {};
+      const out = {
+        Group: bandForRow(row),
+        Range: rng,
+        Row: row,
+        "O/E": parityForRow(row),
+        "Material ID": r["Material ID"] ?? "",
+        "Source ID": r["Source ID"] ?? "",
+        Gen: r.Gen ?? "",
+        CMS: r.CMS ?? "",
+        "In. Code": r["Inbred Code"] ?? "",
+      };
+      for (const c of SELECTION_COLUMNS) {
+        out[c] = stored[c] ?? "";
+        out[`${c.replace(" ", "")} Month`] = monthLabel(out[c]);
+      }
+      return out;
     });
-    holder.append(el("p", { class: "sub" },
-      mode === "band"
-        ? "Ordered 2 rows together, snaking by range within each band."
-        : "Ordered by range, snaking through rows."));
-    holder.append(table(
-      ["Group", "Range", "Row", "O/E", "S 1", "S 2", "Material ID",
-        "Source ID", "Gen", "CMS", "In. Code"], rows));
+
+    const columns = [
+      { key: "Group", type: "number", readOnly: true },
+      { key: "Range", type: "number", readOnly: true },
+      { key: "Row", type: "number", readOnly: true },
+      { key: "O/E", type: "text", readOnly: true },
+      ...SELECTION_COLUMNS.flatMap((c) => [
+        { key: c, type: "number" },
+        // Derived, so read-only — editing it would not change the day it
+        // came from and the two would silently disagree.
+        { key: `${c.replace(" ", "")} Month`, type: "text", readOnly: true },
+      ]),
+      { key: "Material ID", type: "text", readOnly: true },
+      { key: "Source ID", type: "text", readOnly: true },
+      { key: "Gen", type: "text", readOnly: true },
+      { key: "CMS", type: "text", readOnly: true },
+      { key: "In. Code", type: "text", readOnly: true },
+    ];
+
+    const node = grid({
+      id: "Date recording",
+      columns,
+      rows,
+      rowKey: (r) => `${r.Range}_${r.Row}`,
+      owned: true,
+      onEdit: (row, key, value) => {
+        if (!SELECTION_COLUMNS.includes(key)) return;
+        const plot = `${row.Range}_${row.Row}`;
+        state.dateRecording[plot] = {
+          ...(state.dateRecording[plot] ?? {}), [key]: value,
+        };
+        save();
+      },
+      onExport: (api) => runExport("Export", () =>
+        exportGrid(state.code, "Date recording", api)),
+    });
+    registerSheet("Date recording", () =>
+      sheetOf("Date recording", node.gridApi));
+
+    holder.replaceChildren(
+      el("p", { class: "sub" },
+        (mode === "vertical"
+          ? "Serpentine – Vertical: two rows together, snaking by range."
+          : "Serpentine – Horizontal: bay by bay.") +
+        ` ${rows.length} A-line plot(s).` +
+        (state.recordingStart
+          ? ` Recording started ${state.recordingStart}.`
+          : " Set the recording start date to fill in the months.")),
+      node);
   };
 
   main.append(el("div", { class: "btnrow" },
     el("button", {
       class: "action",
-      onclick: () => { mode = "range"; draw(); },
-    }, "Record by range and pull out bags"),
+      onclick: () => { mode = "vertical"; draw(); },
+    }, "Serpentine – Vertical"),
+    el("button", {
+      class: "action",
+      onclick: () => { mode = "horizontal"; draw(); },
+    }, "Serpentine – Horizontal"),
     el("button", {
       class: "action ghost",
-      onclick: () => { mode = "band"; draw(); },
-    }, "Record 2-rows together")));
+      onclick: () => pullOutBags(main),
+    }, "Pull out bags"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => generateTrend(main),
+    }, "Generate graph")));
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action ghost",
+      onclick: async () => {
+        const start = await pickDate("Recording start date",
+          state.recordingStart);
+        if (!start) return;
+        state.recordingStart = start;
+        save();
+        render();
+      },
+    }, state.recordingStart
+      ? `Recording start: ${state.recordingStart}`
+      : "Set recording start date")));
+
   main.append(holder);
   draw();
 };
+
+/** The month a bare day falls in, given the recording start date. */
+function monthLabel(day) {
+  if (!state.recordingStart) return "";
+  const [y, m, d] = state.recordingStart.split("-").map(Number);
+  const stamp = assignMonth(day, d, m, y);
+  return stamp ? MONTH_NAMES[stamp[1] - 1] : "";
+}
+
+/**
+ * Pull out bags: which B-lines to collect for a chosen set of days.
+ *
+ * Selections are recorded against the A-line, but the bags hang on its paired
+ * B-line — the row beside it in the same range. So the A-line's S 1..S 4 are
+ * copied across, then the days the user ticks are matched and the resulting
+ * B-lines listed in horizontal serpentine order, which is the order someone
+ * actually walks the field.
+ */
+function pullOutBags(main) {
+  const aLines = aLineRows();
+  if (!aLines.length) {
+    alert("No A-lines to pull bags for.");
+    return;
+  }
+
+  pickDays("Which recording days are you pulling bags for?").then((days) => {
+    if (!days || !days.length) return;
+    const wanted = new Set(days.map(Number));
+
+    // The B-line paired with an A-line is its neighbour in the same range.
+    const all = fieldbookRows();
+    const byPlot = new Map(all.map((r) => [`${r.Range}:${r.Row}`, r]));
+    const partnerOf = (a) =>
+      byPlot.get(`${a.Range}:${a.Row + 1}`)?.CMS?.toUpperCase() === "B"
+        ? byPlot.get(`${a.Range}:${a.Row + 1}`)
+        : (byPlot.get(`${a.Range}:${a.Row - 1}`)?.CMS?.toUpperCase() === "B"
+          ? byPlot.get(`${a.Range}:${a.Row - 1}`)
+          : null);
+
+    const hits = [];
+    const unpaired = [];
+    for (const a of aLines) {
+      const stored = state.dateRecording?.[`${a.Range}_${a.Row}`] ?? {};
+      const picked = SELECTION_COLUMNS
+        .filter((c) => wanted.has(Number(stored[c])))
+        .map((c) => `${c} = ${stored[c]}`);
+      if (!picked.length) continue;
+
+      const b = partnerOf(a);
+      if (!b) {
+        unpaired.push(`${a.Range}_${a.Row}`);
+        continue;
+      }
+      hits.push({ b, a, picked: picked.join(", ") });
+    }
+
+    if (!hits.length) {
+      alert("No selections recorded on those days.");
+      return;
+    }
+
+    // Horizontal serpentine, as the client asked — bay by bay.
+    const order = serpentineByRange(hits.map((h) => [h.b.Range, h.b.Row]));
+    const byB = new Map(hits.map((h) => [`${h.b.Range}:${h.b.Row}`, h]));
+    const rows = order
+      .map(([rng, row]) => byB.get(`${rng}:${row}`))
+      .filter(Boolean)
+      .map((h) => ({
+        Range: h.b.Range,
+        Row: h.b.Row,
+        Plot: h.b.Plot,
+        "Material ID": h.b["Material ID"],
+        "Source ID": h.b["Source ID"],
+        Gen: h.b.Gen,
+        "A-line plot": h.a.Plot,
+        Selection: h.picked,
+      }));
+
+    const node = grid({
+      id: "Pull out bags",
+      columns: [
+        { key: "Range", type: "number", readOnly: true },
+        { key: "Row", type: "number", readOnly: true },
+        { key: "Plot", type: "text", readOnly: true },
+        { key: "Material ID", type: "text", readOnly: true },
+        { key: "Source ID", type: "text", readOnly: true },
+        { key: "Gen", type: "text", readOnly: true },
+        { key: "A-line plot", type: "text", readOnly: true },
+        { key: "Selection", type: "text", readOnly: true },
+      ],
+      rows,
+      rowKey: (r) => r.Plot,
+      onExport: (api) => runExport("Export", () =>
+        exportGrid(state.code, "Pull out bags", api)),
+    });
+
+    main.append(el("h1", { style: "margin-top:26px;font-size:16px" },
+      `Pull out bags — days ${days.join(", ")}`));
+    main.append(el("p", { class: "sub" },
+      `${rows.length} B-line bag(s) to pull, in walking order.` +
+      (unpaired.length
+        ? ` ${unpaired.length} A-line(s) had no paired B-line and were ` +
+          `skipped: ${unpaired.slice(0, 5).join(", ")}` +
+          (unpaired.length > 5 ? "…" : "")
+        : "")));
+    main.append(node);
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+/** Tick days 1-31, as the client asked, rather than typing a range. */
+function pickDays(label) {
+  return new Promise((resolve) => {
+    const chosen = new Set();
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const boxes = Array.from({ length: 31 }, (_, i) => i + 1).map((day) => {
+      const box = el("input", { type: "checkbox" });
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(day); else chosen.delete(day);
+      });
+      return el("label", { class: "day-box" }, box, el("span", {}, day));
+    });
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal", style: "max-width:420px" },
+        el("h3", {}, label),
+        el("div", { class: "day-grid" }, boxes),
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => close([...chosen].sort((a, b) => a - b)),
+          }, "Show bags"),
+          el("button", { class: "action ghost", onclick: () => close(null) },
+            "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+  });
+}
+
+/**
+ * Generate graph: recordings per day, as a line per selection pass.
+ *
+ * Ported from GenerateS1S2TrendAnalysis. The VBA asks for the start year,
+ * month and day as three separate prompts; one calendar is the same answer.
+ */
+function generateTrend(main) {
+  if (!state.recordingStart) {
+    alert("Set the recording start date first — the months are worked out " +
+      "from it.");
+    return;
+  }
+  const [year, month, day] = state.recordingStart.split("-").map(Number);
+  if (year < 1900 || year > 2100) {
+    alert("Recording start year must be between 1900 and 2100.");
+    return;
+  }
+
+  const rows = aLineRows().map((r) =>
+    state.dateRecording?.[`${r.Range}_${r.Row}`] ?? {});
+  const series = trendCounts(rows, SELECTION_COLUMNS, day, month, year);
+
+  const recorded = series.reduce((n, [, counts]) =>
+    n + Object.values(counts).reduce((a, b) => a + b, 0), 0);
+  if (!recorded) {
+    alert("No selections recorded yet, so there is nothing to plot.");
+    return;
+  }
+
+  main.append(el("h1", { style: "margin-top:26px;font-size:16px" },
+    "S 1 – S 4 recording trend"));
+  main.append(trendChart(series));
+
+  const node = grid({
+    id: "Trend Analysis",
+    columns: [
+      { key: "Date", type: "text", readOnly: true },
+      ...SELECTION_COLUMNS.map((c) => ({
+        key: `${c} Count`, type: "number", readOnly: true,
+      })),
+    ],
+    rows: series.map(([[y, m, d], counts]) => ({
+      Date: `${String(d).padStart(2, "0")}-${MONTH_NAMES[m - 1]}-${y}`,
+      ...Object.fromEntries(
+        SELECTION_COLUMNS.map((c) => [`${c} Count`, counts[c]])),
+    })),
+    rowKey: (r) => r.Date,
+    onExport: (api) => runExport("Export", () =>
+      exportGrid(state.code, "Trend Analysis", api)),
+  });
+  registerSheet("Trend Analysis", () => sheetOf("Trend Analysis", node.gridApi));
+  main.append(node);
+  main.lastChild.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+/**
+ * The trend as inline SVG.
+ *
+ * Drawn by hand rather than pulled in as a chart library — the app ships
+ * offline with no build step, and this is one line per series.
+ */
+function trendChart(series) {
+  const W = 900;
+  const H = 320;
+  const PAD = { top: 16, right: 16, bottom: 54, left: 52 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  const maxCount = Math.max(1, ...series.flatMap(([, c]) =>
+    Object.values(c)));
+  const x = (i) => PAD.left
+    + (series.length > 1 ? (i / (series.length - 1)) * plotW : plotW / 2);
+  // Value axis starts at zero, as the VBA sets MinimumScale = 0.
+  const y = (v) => PAD.top + plotH - (v / maxCount) * plotH;
+
+  const svgEl = (tag, attrs = {}, ...kids) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    for (const kid of kids.flat()) {
+      if (kid === null || kid === undefined) continue;
+      node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return node;
+  };
+
+  const colours = ["#1f4e79", "#c00000", "#548235", "#bf8f00"];
+  const parts = [];
+
+  // Horizontal gridlines and the value axis.
+  const ticks = Math.min(maxCount, 5);
+  for (let t = 0; t <= ticks; t++) {
+    const v = Math.round((maxCount / ticks) * t);
+    parts.push(svgEl("line", {
+      x1: PAD.left, x2: W - PAD.right, y1: y(v), y2: y(v),
+      stroke: "#e5e7eb",
+    }));
+    parts.push(svgEl("text", {
+      x: PAD.left - 8, y: y(v) + 4, "text-anchor": "end",
+      "font-size": "11", fill: "#6b7280",
+    }, v));
+  }
+
+  // Date labels, thinned so they stay readable over a long season.
+  const step = Math.max(1, Math.ceil(series.length / 12));
+  series.forEach(([[, m, d]], i) => {
+    if (i % step) return;
+    parts.push(svgEl("text", {
+      x: x(i), y: H - PAD.bottom + 18, "text-anchor": "middle",
+      "font-size": "10", fill: "#6b7280",
+      transform: `rotate(-45 ${x(i)} ${H - PAD.bottom + 18})`,
+    }, `${d} ${MONTH_NAMES[m - 1]}`));
+  });
+
+  SELECTION_COLUMNS.forEach((column, ci) => {
+    const points = series.map(([, counts], i) => [x(i), y(counts[column])]);
+    if (!points.length) return;
+    parts.push(svgEl("polyline", {
+      fill: "none", stroke: colours[ci], "stroke-width": "2",
+      points: points.map(([px, py]) => `${px},${py}`).join(" "),
+    }));
+    // Markers, as the VBA uses xlLineMarkers.
+    for (const [px, py] of points) {
+      parts.push(svgEl("circle", { cx: px, cy: py, r: "2.5", fill: colours[ci] }));
+    }
+  });
+
+  const legend = el("div", { class: "chart-legend" },
+    SELECTION_COLUMNS.map((c, i) => el("span", { class: "legend-chip" },
+      el("span", {
+        class: "legend-swatch",
+        style: `background:${colours[i]}`,
+      }), c)));
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img",
+    "aria-label": "Recordings per day for each selection pass",
+  },
+  svgEl("line", {
+    x1: PAD.left, x2: PAD.left, y1: PAD.top, y2: H - PAD.bottom,
+    stroke: "#9ca3af",
+  }),
+  svgEl("line", {
+    x1: PAD.left, x2: W - PAD.right, y1: H - PAD.bottom, y2: H - PAD.bottom,
+    stroke: "#9ca3af",
+  }),
+  svgEl("text", {
+    x: W / 2, y: H - 6, "text-anchor": "middle", "font-size": "12",
+    fill: "#374151",
+  }, "Date"),
+  svgEl("text", {
+    x: 14, y: H / 2, "text-anchor": "middle", "font-size": "12",
+    fill: "#374151", transform: `rotate(-90 14 ${H / 2})`,
+  }, "Number of Records"),
+  parts);
+
+  return el("div", { class: "chart-wrap" }, svg, legend);
+}
 
 // Operations and Comments are the same shape: growth stages down the side,
 // groups across. Cells take multiple lines, and extra group columns can be

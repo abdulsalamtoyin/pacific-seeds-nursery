@@ -30,12 +30,15 @@ DRIVER = """
 import {{
   spikeForRow, runDirection, bandForRow, parityForRow,
   serpentineByRange, serpentineTwoRowBands, assignSplits,
+  assignMonth, trendCounts,
 }} from {module!r};
 
 const rows = {rows};
 const plots = {plots};
 const bandPlots = {band_plots};
 const dopRows = {dop_rows};
+const dayValues = {day_values};
+const trendRows = {trend_rows};
 
 const splits = assignSplits(dopRows);
 
@@ -47,8 +50,22 @@ console.log(JSON.stringify({{
   serpRange: serpentineByRange(plots),
   serpBands: serpentineTwoRowBands(bandPlots),
   splits: [...splits.entries()].sort((a, b) => a[0] - b[0]),
+  months: dayValues.map((d) => assignMonth(d, 28, 7, 2026)),
+  monthsWrapping: dayValues.map((d) => assignMonth(d, 20, 12, 2026)),
+  trend: trendCounts(trendRows, ["S 1", "S 2"], 28, 7, 2026),
 }}));
 """
+
+# Blank, zero and non-numeric entries are the ones most likely to diverge
+# between two implementations, so they are all in here.
+DAY_VALUES = [28, 29, 30, 31, 1, 15, 27, 0, -3, "", "28", "n/a"]
+
+TREND_ROWS = [
+    {"S 1": 28, "S 2": 29},
+    {"S 1": 28, "S 2": 1},
+    {"S 1": 1, "S 2": ""},
+    {"S 1": 0, "S 2": 30},
+]
 
 
 @pytest.fixture(scope="module")
@@ -64,6 +81,8 @@ def js_output(tmp_path_factory) -> dict:
             plots=json.dumps([list(p) for p in PLOTS]),
             band_plots=json.dumps([list(p) for p in BAND_PLOTS]),
             dop_rows=json.dumps(DOP_ROWS),
+            day_values=json.dumps(DAY_VALUES),
+            trend_rows=json.dumps(TREND_ROWS),
         ),
         encoding="utf-8",
     )
@@ -107,6 +126,26 @@ def test_serpentine_two_row_bands_matches_python(js_output):
 def test_splits_match_python(js_output):
     expected = sorted(py.assign_splits(DOP_ROWS).items())
     assert [tuple(pair) for pair in js_output["splits"]] == expected
+
+
+def test_month_assignment_matches_python(js_output):
+    """Blanks, zeros and text must resolve to nothing on both sides alike."""
+    expected = [py.assign_month(d, 28, 7, 2026) for d in DAY_VALUES]
+    got = [tuple(m) if m else None for m in js_output["months"]]
+    assert got == expected
+
+
+def test_month_assignment_year_wrap_matches_python(js_output):
+    expected = [py.assign_month(d, 20, 12, 2026) for d in DAY_VALUES]
+    got = [tuple(m) if m else None for m in js_output["monthsWrapping"]]
+    assert got == expected
+
+
+def test_trend_counts_match_python(js_output):
+    expected = [(stamp, counts) for stamp, counts
+                in py.trend_counts(TREND_ROWS, ["S 1", "S 2"], 28, 7, 2026)]
+    got = [(tuple(stamp), counts) for stamp, counts in js_output["trend"]]
+    assert got == expected
 
 
 @pytest.mark.parametrize("types,dates", [

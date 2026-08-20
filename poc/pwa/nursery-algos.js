@@ -78,3 +78,74 @@ export function assignSplits(dopRows) {
   });
   return splits;
 }
+
+// ----------------------------------------------------------------- dates
+//
+// Ported from GenerateS1S2TrendAnalysis in the client's appendix VBA, and
+// mirrored by assign_month() / trend_counts() in nursery_algos.py.
+//
+// Selection columns hold a bare day of the month — the crew writes "28", not
+// a full date — so the month has to be inferred. Recording starts on a known
+// day and runs forward: a day at or after the start day belongs to the
+// starting month, and anything lower has already wrapped into the next one.
+
+/**
+ * Resolve a bare day-of-month into [year, month, day].
+ *
+ * Returns null for blank, non-numeric or zero entries — an unrecorded
+ * selection, which must not be counted as a recording on any date.
+ */
+export function assignMonth(day, startDay, startMonth, startYear) {
+  const text = String(day ?? "").trim();
+  if (!/^-?\d+$/.test(text)) return null;
+  const dayNo = Number(text);
+  if (dayNo <= 0) return null;
+
+  let month = startMonth;
+  let year = startYear;
+  if (dayNo < startDay) {
+    month = startMonth + 1;
+    if (month > 12) {
+      month = 1;
+      year += 1;
+    }
+  }
+  return [year, month, dayNo];
+}
+
+/**
+ * Recordings per calendar date, for the selection trend chart.
+ *
+ * Includes days where nothing was recorded, so the chart shows the gaps
+ * rather than joining across them. UTC throughout — these are calendar
+ * labels, not instants, and local DST would shift the day boundaries.
+ */
+export function trendCounts(rows, columns, startDay, startMonth, startYear) {
+  const counts = new Map();
+  const first = Date.UTC(startYear, startMonth - 1, startDay);
+  let latest = first;
+
+  for (const row of rows) {
+    for (const column of columns) {
+      const stamp = assignMonth(row[column], startDay, startMonth, startYear);
+      if (!stamp) continue;
+      const key = Date.UTC(stamp[0], stamp[1] - 1, stamp[2]);
+      if (!counts.has(key)) counts.set(key, {});
+      const bucket = counts.get(key);
+      bucket[column] = (bucket[column] ?? 0) + 1;
+      if (key > latest) latest = key;
+    }
+  }
+
+  const DAY = 86400000;
+  const out = [];
+  for (let t = first; t <= latest; t += DAY) {
+    const d = new Date(t);
+    const here = counts.get(t) ?? {};
+    out.push([
+      [d.getUTCFullYear(), d.getUTCMonth() + 1, d.getUTCDate()],
+      Object.fromEntries(columns.map((c) => [c, here[c] ?? 0])),
+    ]);
+  }
+  return out;
+}
