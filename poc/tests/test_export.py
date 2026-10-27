@@ -12,9 +12,38 @@ from io import BytesIO
 import pytest
 from openpyxl import load_workbook
 
-from backend.xlsx_export import (
-    build_workbook, sanitise_sheet_name, workbook_bytes,
-)
+import browser_xlsx
+from backend import xlsx_export
+
+# Every case runs twice: against the Python writer behind /export/xlsx, and
+# against pwa/xlsx-writer.js, which the app uses when hosted as static files.
+# The client should get the same spreadsheet whichever one built it.
+WRITERS = {"python": xlsx_export, "browser": browser_xlsx}
+_writer = xlsx_export
+
+
+@pytest.fixture(autouse=True, params=list(WRITERS))
+def writer(request):
+    global _writer
+    _writer = WRITERS[request.param]
+    yield
+    _writer = xlsx_export
+
+
+def workbook_bytes(payload: dict) -> bytes:
+    return _writer.workbook_bytes(payload)
+
+
+def sanitise_sheet_name(name, taken=None):
+    return _writer.sanitise_sheet_name(name, taken)
+
+
+def build_workbook(payload: dict):
+    """Build and discard; refusals surface as ValueError from either writer."""
+    try:
+        return workbook_bytes(payload)
+    except browser_xlsx.BrowserError as e:
+        raise ValueError(str(e)) from e
 
 # The nine-column entry block from Tab information.xlsx, in order.
 ENTRY_BLOCK = [

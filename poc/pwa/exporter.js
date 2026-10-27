@@ -1,18 +1,22 @@
 // Downloading tabs as real Excel files.
 //
-// The browser has no spreadsheet writer and we are not bundling one, so the
-// grid posts what it is showing to /export/xlsx and the backend builds the
-// workbook with openpyxl. Four shapes are needed:
+// The workbook is built in the browser (xlsx-writer.js, on the vendored
+// ExcelJS), so export works with no server behind the app — which is what
+// lets it be hosted as static files on SharePoint. Four shapes are needed:
 //
 //   one tab      — the Export button on a grid
 //   whole book   — every tab as its own sheet, one file
 //   each tab     — the same tabs, one file apiece
 //   Bartender    — the packet list, Source ID descending
 //
-// Sheets are described the same way in all four, so the backend only has one
+// Sheets are described the same way in all four, so the writer only has one
 // format to understand.
 
-const ENDPOINT = "/export/xlsx";
+import { loadExcelJS } from "./excel-lib.js";
+import { workbookBytes } from "./xlsx-writer.js";
+
+const XLSX_TYPE =
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 /** Strip characters Windows will not accept in a file name. */
 function safeName(name) {
@@ -40,23 +44,13 @@ export function sheetFromGrid(name, api, extra = {}) {
   };
 }
 
-/** Post sheets and save the workbook the backend sends back. */
+/** Build the workbook from these sheets and save it. */
 export async function download(filename, sheets) {
-  const res = await fetch(ENDPOINT, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ filename: safeName(filename), sheets }),
-  });
+  const ExcelJS = await loadExcelJS();
+  const bytes = await workbookBytes(
+    { filename: safeName(filename), sheets }, ExcelJS);
 
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      detail = (await res.json()).detail || detail;
-    } catch { /* response was not JSON */ }
-    throw new Error(detail);
-  }
-
-  const blob = await res.blob();
+  const blob = new Blob([bytes], { type: XLSX_TYPE });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;

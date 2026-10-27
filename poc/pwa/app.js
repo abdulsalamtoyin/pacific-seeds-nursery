@@ -17,6 +17,8 @@ import * as store from "./store.js";
 import { grid } from "./grid.js";
 import { todayISO } from "./grid-core.js";
 import { download, exportBartender } from "./exporter.js";
+import { loadExcelJS } from "./excel-lib.js";
+import { readPrism } from "./prism-reader.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -459,20 +461,11 @@ VIEWS.Home = (main) => {
 };
 
 // Import the PRISM export straight from the downloaded file. Parsing happens
-// on the backend, which already has openpyxl — the browser would otherwise
-// need a spreadsheet library bundled just to read one sheet.
+// in the browser (prism-reader.js), so the app needs no server and can be
+// hosted as static files; CSV and TSV never load the spreadsheet library.
 async function importFile(file, key) {
-  const body = new FormData();
-  body.append("file", file);
-  const res = await fetch("/parse/prism", { method: "POST", body });
-  if (!res.ok) {
-    let detail = `${res.status} ${res.statusText}`;
-    try {
-      detail = (await res.json()).detail || detail;
-    } catch { /* response was not JSON */ }
-    throw new Error(detail);
-  }
-  const data = await res.json();
+  const isText = /\.(csv|tsv|txt)$/i.test(file.name);
+  const data = await readPrism(file, isText ? null : await loadExcelJS());
   if (!data.rows.length) {
     throw new Error("The file parsed, but no data rows were found.");
   }

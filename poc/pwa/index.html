@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Pacific Seeds — Nursery Workbook</title>
-<link rel="icon" href="/static/ps-logo.svg">
+<link rel="icon" href="ps-logo.svg">
 <style>
   :root {
     --navy: #092a40;
@@ -303,7 +303,7 @@
 </head>
 <body>
   <header class="brand">
-    <img src="/static/ps-logo-white.svg" alt="">
+    <img src="ps-logo-white.svg" alt="">
     <b>Nursery Workbook</b>
   </header>
 
@@ -319,8 +319,9 @@
   <nav id="nav"></nav>
   <main id="main"></main>
 
-  <!-- Absolute /static paths: the page is served at /app, so relative URLs
-       would resolve to /app.js and miss the StaticFiles mount. -->
-  <script type="module" src="/static/app.js"></script>
+  <!-- Relative paths, so the folder works wherever it is put: a static host,
+       a SharePoint embed, or the desktop server (which redirects /app to
+       /static/index.html for this reason). -->
+  <script type="module" src="app.js"></script>
 </body>
 </html>

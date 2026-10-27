@@ -19,7 +19,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import (
+    FileResponse, HTMLResponse, RedirectResponse, Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -686,8 +688,11 @@ def landing() -> FileResponse:
 
 
 @app.get("/app")
-def app_index() -> FileResponse:
-    return FileResponse(PWA_DIR / "index.html")
+def app_index() -> RedirectResponse:
+    # The page uses relative paths so the same folder can be hosted as static
+    # files (SharePoint). Served from /static/ those resolve; from /app they
+    # would not, so send the browser there rather than serve it here.
+    return RedirectResponse("/static/index.html")
 
 
 # Keep the older URL working as an alias.
