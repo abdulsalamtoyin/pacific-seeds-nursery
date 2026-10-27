@@ -457,6 +457,12 @@ function startSync(account) {
     metaBackend: localStorage,
     metaKey: `ps-sync-meta:${account.homeAccountId}`,
     onEvent: onSyncEvent,
+    // A shared computer may hold someone else's nurseries; ask before they
+    // are copied into this person's OneDrive.
+    confirmAdopt: async (codes) => confirm(
+      `This computer already has ${codes.length} nursery(s): ${codes.join(", ")}.\n\n` +
+      "Copy them to your OneDrive? Choose Cancel if they are not yours — " +
+      "they will stay on this computer and not sync."),
   });
   stopSync = syncEngine.start();
 }
@@ -532,8 +538,27 @@ function syncPanel() {
       onclick: async () => {
         if (!confirm("Sign out of OneDrive? Nurseries stay on this computer; " +
           "they stop syncing until you sign in again.")) return;
+        // Offer before stopping, while a final sync can still save edits.
+        const wipe = confirm("Also remove the nurseries from this computer? " +
+          "Choose this on a shared computer; they stay safe in your OneDrive.");
+        // Only nurseries whose latest content is on OneDrive are removed;
+        // unsynced edits and nurseries kept local at sign-in stay put.
+        let removable = [];
+        if (wipe && syncEngine) {
+          await syncEngine.sync();
+          removable = syncEngine.safeToRemove();
+        }
         stopSyncing();
         try { await auth.signOut(); } catch { /* popup closed — still signed out here */ }
+        if (wipe) {
+          for (const id of removable) store.deleteNursery(id);
+          state = store.activeNursery();
+          const kept = store.listNurseries().filter((n) => n.code).length;
+          if (kept) {
+            alert(`${kept} nursery(s) were not safely on OneDrive and were ` +
+              "left on this computer so nothing is lost.");
+          }
+        }
         render();
       },
     }, "Sign out")));

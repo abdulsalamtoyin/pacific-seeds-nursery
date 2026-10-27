@@ -34,7 +34,7 @@ const mem = () => {{
 
 // A computer: its own store instance (the ?tag makes node load a fresh copy),
 // its own sync records, and the shared fake OneDrive.
-async function computer(tag, {{ token = "tok-1", refreshed = "tok-1" }} = {{}}) {{
+async function computer(tag, {{ token = "tok-1", refreshed = "tok-1", confirmAdopt }} = {{}}) {{
   const store = await import(url({store!r}) + "?" + tag);
   store.useBackend(mem());
   const waits = [];
@@ -44,7 +44,7 @@ async function computer(tag, {{ token = "tok-1", refreshed = "tok-1" }} = {{}}) 
     wait: async (ms) => {{ waits.push(ms); }},
   }});
   const states = [];
-  const sync = createSync({{ store, drive, metaBackend: mem(),
+  const sync = createSync({{ store, drive, metaBackend: mem(), confirmAdopt,
                             onEvent: (e) => states.push(e.state) }});
   return {{ store, sync, drive, waits, states }};
 }}
@@ -98,6 +98,52 @@ def test_an_untouched_blank_nursery_is_not_uploaded():
     """)
     assert out["files"] == 0
 
+
+
+# ------------------------------------------------------ shared computers
+
+
+def test_nurseries_already_here_are_not_uploaded_if_declined():
+    """Someone else may have used this browser; their nurseries must not be
+    copied into the account that signs in next."""
+    out = run("""
+      const asked = [];
+      const b = await computer("b", { confirmAdopt: async (codes) => { asked.push(codes); return false; } });
+      b.store.createNursery({ code: "PREVIOUS-USER" });
+      await b.sync.sync();
+      out.filesAfterDecline = graph.files.size;
+      b.store.createNursery({ code: "MINE-27S" });
+      await b.sync.sync();
+      out.uploaded = [...graph.files.values()].map((f) => JSON.parse(f.content).nursery.code);
+      out.asked = asked;
+      out.removable = b.sync.safeToRemove().map((id) => b.store.snapshot()[id].code);
+    """)
+    assert out["asked"] == [["PREVIOUS-USER"]]          # once, with the codes
+    assert out["filesAfterDecline"] == 0
+    assert out["uploaded"] == ["MINE-27S"]
+    assert out["removable"] == ["MINE-27S"]             # the declined one is never wiped
+
+
+def test_nurseries_already_here_are_uploaded_if_accepted():
+    out = run("""
+      const b = await computer("b", { confirmAdopt: async () => true });
+      b.store.createNursery({ code: "AUQDGT01-27S" });
+      out.result = await b.sync.sync();
+    """)
+    assert out["result"]["uploaded"] == 1
+
+
+def test_unsynced_edits_are_not_safe_to_remove():
+    out = run("""
+      const a = await computer("a");
+      const id = a.store.createNursery({ code: "AUQDGT01-27S" });
+      await a.sync.sync();
+      out.before = a.sync.safeToRemove().length;
+      a.store.renameNursery(id, { code: "EDITED" });
+      out.after = a.sync.safeToRemove().length;
+    """)
+    assert out["before"] == 1
+    assert out["after"] == 0
 
 def test_a_second_computer_receives_the_nurseries():
     out = run("""

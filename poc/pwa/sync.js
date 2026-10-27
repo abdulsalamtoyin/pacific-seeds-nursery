@@ -51,9 +51,14 @@ export function fingerprint(nursery) {
  * @param metaKey      per signed-in account, so two people sharing a browser
  *                     never compare against each other's OneDrive
  * @param onEvent      called with the status after every change of it
+ * @param confirmAdopt asked once per account, before its first sync, with the
+ *                     codes of the nurseries already in this browser. They may
+ *                     belong to whoever used the computer before, so they go
+ *                     to this account's OneDrive only if it resolves true;
+ *                     otherwise they stay here, unsynced. Omitted = adopt.
  */
 export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta",
-  onEvent = () => {}, now = () => new Date() }) {
+  onEvent = () => {}, now = () => new Date(), confirmAdopt = null }) {
   const blankPrint = fingerprint(structuredClone(store.BLANK_NURSERY));
   const conflicts = new Map();
   let meta = loadMeta();
@@ -119,6 +124,7 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
 
     for (const id of ids) {
       if (conflicts.has(id)) continue;          // waiting on the user
+      if (meta.localOnly?.includes(id)) continue;  // declined at first sign-in
       const L = local[id];
       const R = remote.get(id);
       const M = meta.files[id];
@@ -192,12 +198,28 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
     return raced;
   }
 
+  // First sync for this account: the browser's nurseries are not known to be
+  // this person's, so ask before any of them leave for their OneDrive.
+  async function adoptOnce() {
+    if (meta.adoptAsked) return;
+    if (meta.lastSync || !confirmAdopt) { meta.adoptAsked = true; saveMeta(); return; }
+    const local = store.snapshot();
+    const ids = Object.keys(local).filter((id) =>
+      !meta.files[id] && fingerprint(local[id]) !== blankPrint);
+    const ok = ids.length === 0
+      || await confirmAdopt(ids.map((id) => local[id].code || "(untitled)"));
+    if (!ok) meta.localOnly = ids;
+    meta.adoptAsked = true;
+    saveMeta();
+  }
+
   async function run() {
     emit({ state: "syncing", error: null, changedLocal: false });
     const report = {
       uploaded: 0, downloaded: 0, deleted: 0, skipped: [], changedLocal: false,
     };
     try {
+      await adoptOnce();
       // A race means OneDrive moved under us mid-pass; the next pass sees it
       // as a remote change and handles it properly. Bounded, not a loop.
       for (let i = 0; i < 3 && await pass(report); i++) { /* re-check */ }
@@ -287,8 +309,15 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
     };
   }
 
+  /** Nurseries whose current content is on OneDrive, so removing them here loses nothing. */
+  function safeToRemove() {
+    const local = store.snapshot();
+    return Object.keys(local).filter((id) =>
+      meta.files[id] && fingerprint(local[id]) === meta.files[id].hash);
+  }
+
   return {
-    sync, resolve, start,
+    sync, resolve, start, safeToRemove,
     status: () => ({ ...status, conflicts: [...conflicts.values()] }),
   };
 }
