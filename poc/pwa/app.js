@@ -22,6 +22,10 @@ import { readPrism } from "./prism-reader.js";
 import * as auth from "./auth.js";
 import { createDrive } from "./onedrive.js";
 import { createSync } from "./sync.js";
+import {
+  createFileSave, fileSaveSupported, browserPickers, idbMeta,
+  serialise, parseFile, overwrittenCodes, loadInto,
+} from "./file-save.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -565,12 +569,186 @@ function syncPanel() {
   return box;
 }
 
+// ---------------------------------------------------------------- save file
+//
+// Without sync configured (always the case in the single-file build) the
+// nurseries can be kept in a file in the user's OneDrive folder instead, and
+// the OneDrive desktop app uploads it. file-save.js has the rules. Browsers
+// that cannot write to a chosen file get download/restore of the same file.
+
+let fileSave = null;
+let fileStatus = null;
+
+const FILE_TEXT = {
+  saving: "saving…",
+  saved: "saved",
+  reconnect: "click to keep saving (see Home)",
+  changed: "changed elsewhere (see Home)",
+  error: "save problem (see Home)",
+};
+
+const clock = (iso) =>
+  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+function updateFileBadge() {
+  const badge = $("#syncBadge");
+  if (!badge) return;
+  const text = FILE_TEXT[fileStatus?.state];
+  if (!text) { badge.textContent = ""; return; }
+  const when = fileStatus.state === "saved" ? ` ${clock(fileStatus.lastSaved)}` : "";
+  badge.textContent = `Save file: ${text}${when}`;
+}
+
+function onFileEvent(status) {
+  fileStatus = status;
+  updateFileBadge();
+  // Nurseries came in from the file: re-point and redraw, as for sync.
+  if (status.changedLocal) state = store.activeNursery();
+  if (status.changedLocal || activeTab === "Home") render();
+}
+
+const confirmReplace = async (codes) => confirm(
+  `The file has a different copy of ${codes.join(", ")}.\n\n` +
+  "Replace this computer's copy with the file's? Choose Cancel to leave " +
+  "everything as it is.");
+
+/** Run a file action from a click; closing the file picker is not an error. */
+const fileAction = (fn) => async () => {
+  try {
+    await fn();
+  } catch (err) {
+    if (err.name !== "AbortError") alert(err.message);
+  }
+};
+
+async function bootFileSave() {
+  if (auth.syncConfigured() || !fileSaveSupported()) return;
+  fileSave = createFileSave({
+    store, meta: idbMeta(), pickers: browserPickers,
+    onEvent: onFileEvent, confirmReplace,
+  });
+  try {
+    await fileSave.start();
+  } catch (err) {
+    onFileEvent({ state: "error", error: err.message });
+  }
+}
+
+function filePanel() {
+  if (auth.syncConfigured()) return null;
+  const box = el("div", { class: "home-card" }, el("h3", {}, "Save file"));
+  if (!fileSave) return backupPanel(box);
+
+  const s = fileStatus ?? { state: "off" };
+  const name = s.fileName ?? "the save file";
+  const stop = el("button", {
+    class: "action ghost",
+    onclick: fileAction(async () => {
+      if (!confirm(`Stop saving to ${name}? Nurseries stay on this ` +
+        "computer, and the file is left as it is.")) return;
+      await fileSave.stop();
+    }),
+  }, "Stop saving to file");
+  const openOther = (label) => el("button", {
+    class: "action ghost", onclick: fileAction(() => fileSave.openExisting()),
+  }, label);
+
+  if (s.state === "off") {
+    box.append(
+      el("p", {},
+        "Nurseries are saved in this browser only. Save them to a file in " +
+        "your OneDrive folder too, so they are backed up and can be opened " +
+        "on another computer. Already have a save file? Open it instead."),
+      el("div", { class: "btnrow" },
+        el("button", {
+          class: "action", onclick: fileAction(() => fileSave.chooseNew()),
+        }, "Save to a new file…"),
+        openOther("Open a save file…")));
+  } else if (s.state === "reconnect") {
+    box.append(
+      el("p", {},
+        `Nurseries are being saved to ${name}. The browser needs your OK ` +
+        "each time the app is opened before it can save there again."),
+      el("div", { class: "btnrow" },
+        el("button", {
+          class: "action", onclick: fileAction(() => fileSave.reconnect()),
+        }, `Keep saving to ${name}`),
+        stop));
+  } else if (s.state === "changed") {
+    const when = s.fileSavedAt ? ` at ${new Date(s.fileSavedAt).toLocaleString()}` : "";
+    box.append(
+      el("p", {},
+        `${name} was saved from another computer${when}. Nothing has been ` +
+        "saved here since, so neither copy is lost — choose which to keep."),
+      el("div", { class: "btnrow" },
+        el("button", {
+          class: "action", onclick: fileAction(() => fileSave.resolve("file")),
+        }, "Use the file's nurseries"),
+        el("button", {
+          class: "action ghost", onclick: fileAction(() => fileSave.resolve("mine")),
+        }, "Replace the file with this computer's"),
+        stop));
+  } else {
+    const last = s.lastSaved ? new Date(s.lastSaved).toLocaleString() : "not yet";
+    box.append(el("p", {}, `Saving to ${name}. Last saved: ${last}.`));
+    if (s.error) box.append(el("p", { class: "sub" }, s.error));
+    box.append(el("div", { class: "btnrow" },
+      el("button", {
+        class: "action", onclick: fileAction(() => fileSave.saveNow()),
+      }, "Save now"),
+      openOther("Open a different file…"),
+      stop));
+  }
+  return box;
+}
+
+/** For browsers without file access: the same file, by download and upload. */
+function backupPanel(box) {
+  const input = el("input", {
+    type: "file", accept: ".json,application/json", style: "display:none",
+    onchange: fileAction(async () => {
+      const file = input.files[0];
+      input.value = "";
+      if (!file) return;
+      const doc = parseFile(await file.text());
+      if (!doc) throw new Error("That file is empty.");
+      const clash = overwrittenCodes(store, doc);
+      if (clash.length && !await confirmReplace(clash)) return;
+      loadInto(store, doc);
+      state = store.activeNursery();
+      render();
+    }),
+  });
+  box.append(
+    el("p", {},
+      "This browser cannot keep saving to a file, so nurseries are saved in " +
+      "this browser only. Download a backup to your OneDrive folder now and " +
+      "then; Chrome or Edge can save there automatically."),
+    el("div", { class: "btnrow" },
+      el("button", {
+        class: "action",
+        onclick: () => {
+          const text = serialise(store.snapshot(), "backup");
+          const a = el("a", {
+            href: URL.createObjectURL(new Blob([text], { type: "application/json" })),
+            download: `Nursery Workbook backup ${todayISO()}.json`,
+          });
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        },
+      }, "Download backup"),
+      el("button", { class: "action ghost", onclick: () => input.click() },
+        "Restore from backup…"),
+      input));
+  return box;
+}
+
 VIEWS.Home = (main) => {
   main.append(...pageHead("Nursery Workflow",
     "Run each step in order. The same steps as the workbook's Home tab."));
 
   main.append(nurseryPicker());
-  const panel = syncPanel();
+  const panel = syncPanel() ?? filePanel();
   if (panel) main.append(panel);
 
   if (!state.code) {
@@ -2129,3 +2307,4 @@ $("#btnReset").addEventListener("click", () => {
 
 render();
 bootSync();
+bootFileSave();
