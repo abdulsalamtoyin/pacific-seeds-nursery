@@ -139,8 +139,46 @@ function read() {
   return data;
 }
 
+// Called after every write, so OneDrive sync can notice changes without each
+// view having to report what it touched.
+const listeners = new Set();
+
 function persist() {
   backend.setItem(STORE_KEY, JSON.stringify(data));
+  for (const fn of listeners) {
+    try { fn(); } catch (err) { console.error(err); }
+  }
+}
+
+/** Run `fn` after every save. Returns the unsubscribe function. */
+export function subscribe(fn) {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
+}
+
+/** Every nursery by id, deep-copied so a caller cannot edit them in place. */
+export function snapshot() {
+  return structuredClone(read().nurseries);
+}
+
+/**
+ * Store a nursery under a known id — how sync brings in one from OneDrive.
+ * The active pointer only moves if the store had nothing active.
+ */
+export function putNursery(id, nursery) {
+  const store = read();
+  const next = blankNursery(structuredClone(nursery));
+  const existing = store.nurseries[id];
+  if (existing) {
+    // Replace in place: the app holds this object as its open nursery, and a
+    // fresh object would leave its next edits going into a detached copy.
+    for (const key of Object.keys(existing)) delete existing[key];
+    Object.assign(existing, next);
+  } else {
+    store.nurseries[id] = next;
+  }
+  if (!store.activeId) store.activeId = id;
+  persist();
 }
 
 /** Write the current state back to storage. */

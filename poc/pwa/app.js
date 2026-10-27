@@ -19,6 +19,9 @@ import { todayISO } from "./grid-core.js";
 import { download, exportBartender } from "./exporter.js";
 import { loadExcelJS } from "./excel-lib.js";
 import { readPrism } from "./prism-reader.js";
+import * as auth from "./auth.js";
+import { createDrive } from "./onedrive.js";
+import { createSync } from "./sync.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -406,11 +409,144 @@ function nurseryPicker() {
     }, "Delete"));
 }
 
+// ---------------------------------------------------------------- OneDrive
+//
+// Off unless sync-config.js holds the organisation's app registration. When
+// on, the browser copy is still the working copy; sync.js copies it to and
+// from OneDrive › Apps › <app> in the background.
+
+let syncEngine = null;
+let stopSync = null;
+let syncStatus = null;
+
+const SYNC_TEXT = {
+  idle: "synced",
+  syncing: "syncing…",
+  offline: "offline — saved on this computer",
+  conflict: "needs a decision (see Home)",
+  signin: "sign in again (see Home)",
+  signedout: "not signed in (see Home)",
+  error: "sync problem (see Home)",
+};
+
+function updateSyncBadge() {
+  const badge = $("#syncBadge");
+  if (!badge) return;
+  if (!syncStatus) { badge.textContent = ""; return; }
+  const when = syncStatus.state === "idle" && syncStatus.lastSync
+    ? ` ${new Date(syncStatus.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "";
+  badge.textContent = `OneDrive: ${SYNC_TEXT[syncStatus.state] ?? syncStatus.state}${when}`;
+}
+
+function onSyncEvent(status) {
+  syncStatus = status;
+  updateSyncBadge();
+  // Another computer's changes landed: redraw so the screen shows them.
+  // putNursery replaced the open nursery in place, so `state` is still live,
+  // but a deletion elsewhere can remove it — re-point to be safe.
+  if (status.changedLocal) state = store.activeNursery();
+  if (status.changedLocal || activeTab === "Home") render();
+}
+
+function startSync(account) {
+  stopSync?.();
+  syncEngine = createSync({
+    store,
+    drive: createDrive({ getToken: auth.getToken }),
+    metaBackend: localStorage,
+    metaKey: `ps-sync-meta:${account.homeAccountId}`,
+    onEvent: onSyncEvent,
+  });
+  stopSync = syncEngine.start();
+}
+
+function stopSyncing() {
+  stopSync?.();
+  stopSync = null;
+  syncEngine = null;
+  syncStatus = null;
+  updateSyncBadge();
+}
+
+async function bootSync() {
+  if (!auth.syncConfigured()) return;
+  try {
+    const account = await auth.initAuth();
+    if (account) startSync(account);
+    else { syncStatus = { state: "signedout", conflicts: [] }; updateSyncBadge(); }
+  } catch (err) {
+    syncStatus = { state: "error", error: err.message, conflicts: [] };
+    updateSyncBadge();
+  }
+  if (activeTab === "Home") render();
+}
+
+function syncPanel() {
+  if (!auth.syncConfigured()) return null;
+  const account = auth.currentAccount();
+  const box = el("div", { class: "home-card" }, el("h3", {}, "OneDrive"));
+
+  if (!account || syncStatus?.state === "signin") {
+    box.append(
+      el("p", {}, account
+        ? "Microsoft needs you to sign in again before nurseries can sync. " +
+          "Your work is safe on this computer meanwhile."
+        : "Sign in to keep your nurseries in your OneDrive, so they are " +
+          "backed up and open on any computer you sign in on."),
+      el("button", {
+        class: "action",
+        onclick: async () => {
+          try {
+            startSync(await auth.signIn());
+          } catch (err) {
+            alert(`Sign-in did not finish.\n\n${err.message}`);
+          }
+        },
+      }, "Sign in with Microsoft"));
+    return box;
+  }
+
+  const s = syncStatus ?? { state: "syncing", conflicts: [] };
+  const last = s.lastSync ? new Date(s.lastSync).toLocaleString() : "not yet";
+  box.append(el("p", {},
+    `Signed in as ${account.username}. ` +
+    `OneDrive: ${SYNC_TEXT[s.state] ?? s.state}. Last synced: ${last}.`));
+  if (s.error && s.state !== "offline") box.append(el("p", { class: "sub" }, s.error));
+
+  for (const c of s.conflicts || []) {
+    const choose = (choice) => async () => {
+      try { await syncEngine.resolve(c.id, choice); } catch (err) { alert(err.message); }
+    };
+    box.append(el("div", { class: "btnrow" },
+      el("span", {}, `${c.code} was changed here and on another computer.`),
+      el("button", { class: "action", onclick: choose("mine") }, "Keep this computer's"),
+      el("button", { class: "action ghost", onclick: choose("theirs") }, "Keep OneDrive's"),
+      el("button", { class: "action ghost", onclick: choose("both") }, "Keep both")));
+  }
+
+  box.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => syncEngine?.sync() }, "Sync now"),
+    el("button", {
+      class: "action ghost",
+      onclick: async () => {
+        if (!confirm("Sign out of OneDrive? Nurseries stay on this computer; " +
+          "they stop syncing until you sign in again.")) return;
+        stopSyncing();
+        try { await auth.signOut(); } catch { /* popup closed — still signed out here */ }
+        render();
+      },
+    }, "Sign out")));
+  return box;
+}
+
 VIEWS.Home = (main) => {
   main.append(...pageHead("Nursery Workflow",
     "Run each step in order. The same steps as the workbook's Home tab."));
 
   main.append(nurseryPicker());
+  const panel = syncPanel();
+  if (panel) main.append(panel);
 
   if (!state.code) {
     main.append(el("div", { class: "note" },
@@ -1967,3 +2103,4 @@ $("#btnReset").addEventListener("click", () => {
 });
 
 render();
+bootSync();
