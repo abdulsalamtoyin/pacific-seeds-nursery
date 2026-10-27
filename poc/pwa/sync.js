@@ -316,8 +316,21 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
       meta.files[id] && fingerprint(local[id]) === meta.files[id].hash);
   }
 
+  /**
+   * Remove nurseries from this computer only. Their records go too, so the
+   * next sync sees them as OneDrive's and downloads them — without this it
+   * would read their absence as a local delete and delete them on OneDrive.
+   */
+  function removeLocal(ids) {
+    for (const id of ids) {
+      delete meta.files[id];
+      if (store.snapshot()[id]) store.deleteNursery(id);
+    }
+    saveMeta();
+  }
+
   return {
-    sync, resolve, start, safeToRemove,
+    sync, resolve, start, safeToRemove, removeLocal,
     status: () => ({ ...status, conflicts: [...conflicts.values()] }),
   };
 }

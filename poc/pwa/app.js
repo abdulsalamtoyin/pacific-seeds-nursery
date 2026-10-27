@@ -543,15 +543,15 @@ function syncPanel() {
           "Choose this on a shared computer; they stay safe in your OneDrive.");
         // Only nurseries whose latest content is on OneDrive are removed;
         // unsynced edits and nurseries kept local at sign-in stay put.
-        let removable = [];
+        // removeLocal also forgets them, or the next sign-in would treat
+        // them as deleted here and delete them from OneDrive too.
         if (wipe && syncEngine) {
           await syncEngine.sync();
-          removable = syncEngine.safeToRemove();
+          syncEngine.removeLocal(syncEngine.safeToRemove());
         }
         stopSyncing();
         try { await auth.signOut(); } catch { /* popup closed — still signed out here */ }
         if (wipe) {
-          for (const id of removable) store.deleteNursery(id);
           state = store.activeNursery();
           const kept = store.listNurseries().filter((n) => n.code).length;
           if (kept) {

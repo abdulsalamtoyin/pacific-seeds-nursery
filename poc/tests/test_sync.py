@@ -381,3 +381,22 @@ def test_a_broken_file_is_skipped_not_fatal():
     assert out["result"]["uploaded"] == 1
     assert out["state"] == "idle"
     assert "nursery-bad.json" in out["error"]
+
+
+def test_removing_from_this_computer_never_deletes_from_onedrive():
+    """Sign-out's "remove from this computer": signing in again later must
+    bring the nurseries back, not read their absence as a delete."""
+    out = run("""
+      const a = await computer("a");
+      a.store.createNursery({ code: "AUQDGT01-27S" });
+      await a.sync.sync();
+      a.sync.removeLocal(a.sync.safeToRemove());
+      out.localAfterRemove = codes(a);
+      out.result = await a.sync.sync();            // the next sign-in
+      out.onedrive = graph.files.size;
+      out.localAfterSync = codes(a);
+    """)
+    assert out["localAfterRemove"] == []
+    assert out["onedrive"] == 1
+    assert out["result"]["deleted"] == 0
+    assert out["localAfterSync"] == ["AUQDGT01-27S"]
