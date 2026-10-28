@@ -196,6 +196,26 @@ out.b = codes(b);
     assert out["b"] == ["N1", "N1"]
 
 
+def test_hostile_file_names_in_the_shared_folder_are_ignored():
+    out = run("""
+// Raw text: in a JS literal "__proto__:" would set the prototype, not a key.
+const body = (id) => `{"schema":1,"id":${JSON.stringify(id)},"author":"x",` +
+  `"nursery":{"code":"EVIL","__proto__":{"polluted":true}}}`;
+for (const id of ["__proto__", "constructor", "prototype", "../x"]) {
+  files.set(`nursery-${id}.json`, { text: body(id), lastModified: clock++ });
+}
+files.set("nursery-n-ok.json", { text: body("n-ok"), lastModified: clock++ });
+const b = await computer("b", "Ben");
+await b.sync.sync();
+out.codes = codes(b);
+out.polluted = ({}).code !== undefined || ({}).polluted !== undefined;
+out.ownProto = Object.getPrototypeOf(b.store.snapshot()["n-ok"]) === Object.prototype;
+""")
+    assert out["codes"] == ["EVIL"]          # only the well-named file
+    assert out["polluted"] is False
+    assert out["ownProto"] is True
+
+
 def test_backup_rejects_files_that_are_not_ours():
     out = run("""
 for (const [k, text] of Object.entries({ junk: "not json", other: '{"a":1}',

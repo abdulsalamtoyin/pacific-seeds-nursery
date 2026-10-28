@@ -25,9 +25,16 @@ const SCHEMA = 1;
 class BadFileError extends Error {}
 
 export const fileName = (id) => `${PREFIX}${id}.json`;
-const idFromName = (name) =>
-  name.startsWith(PREFIX) && name.endsWith(".json")
-    ? name.slice(PREFIX.length, -".json".length) : null;
+// Ids become object keys, and a shared folder lets anyone add a file, so a
+// name like "nursery-__proto__.json" must not reach the store. Spaces and
+// brackets stay allowed: OneDrive names its conflict copies "… (1)".
+const SAFE_ID = /^[\w() -]+$/;
+const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
+const idFromName = (name) => {
+  if (!name.startsWith(PREFIX) || !name.endsWith(".json")) return null;
+  const id = name.slice(PREFIX.length, -".json".length);
+  return SAFE_ID.test(id) && !RESERVED.has(id) ? id : null;
+};
 
 /** cyrb53 — a fast 53-bit string hash; enough to tell "changed" apart. */
 export function fingerprint(nursery) {

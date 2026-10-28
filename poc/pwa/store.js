@@ -168,7 +168,11 @@ export function snapshot() {
 export function putNursery(id, nursery) {
   const store = read();
   const next = blankNursery(structuredClone(nursery));
-  const existing = store.nurseries[id];
+  // JSON.parse keeps "__proto__" as a plain key; Object.assign below would
+  // turn it into a prototype swap.
+  delete next.__proto__;
+  // Own entries only: an inherited key ("constructor") is not a nursery.
+  const existing = Object.hasOwn(store.nurseries, id) ? store.nurseries[id] : null;
   if (existing) {
     // Replace in place: the app holds this object as its open nursery, and a
     // fresh object would leave its next edits going into a detached copy.
