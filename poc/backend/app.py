@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import sys
 import tempfile
@@ -18,9 +19,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import (
+    FileResponse, HTMLResponse, RedirectResponse, Response,
+)
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+
+from backend.xlsx_export import workbook_bytes
 
 ROOT = Path(__file__).resolve().parent.parent
 # Per-user dirs can be overridden via env (set by the desktop launcher on Windows).
@@ -299,11 +304,14 @@ def dashboard() -> str:
 async def admin_inspect(file: UploadFile = File(...)) -> dict:
     """Quick peek into an uploaded .xlsx: returns sheet names + best guess at
     the PRISM data sheet (one with a Range/Row/Source ID header)."""
+    import io
+
     from openpyxl import load_workbook
-    tmp = Path(tempfile.gettempdir()) / f"inspect_{file.filename}"
-    tmp.write_bytes(await file.read())
+    # Read from memory rather than a path built from file.filename — a crafted
+    # name like "../../etc/x" would otherwise escape the temp directory.
+    raw = await file.read()
     try:
-        wb = load_workbook(tmp, read_only=True, data_only=True)
+        wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         sheets = []
         guess = None
         for name in wb.sheetnames:
@@ -332,9 +340,87 @@ async def admin_inspect(file: UploadFile = File(...)) -> dict:
         return {"sheets": sheets, "suggested": guess or (sheets[0]["name"] if sheets else None)}
     except Exception as e:
         raise HTTPException(400, f"Could not read file: {e}")
-    finally:
-        try: tmp.unlink()
-        except Exception: pass
+
+
+@app.post("/parse/prism")
+async def parse_prism(file: UploadFile = File(...),
+                      sheet: str | None = Form(None)) -> dict:
+    """Read a PRISM export and hand back its rows as JSON.
+
+    Accepts .xlsx/.xlsm or .csv/.tsv. PRISM downloads arrive with the data on
+    a sheet called 'Sheet 1', and the header row sits at row 1 or row 5
+    depending on how it was saved, so both are found by scanning rather than
+    assumed.
+    """
+    import csv
+    import io
+    from datetime import date, datetime as dt
+
+    raw = await file.read()
+    name = (file.filename or "").lower()
+
+    def clean(v: Any) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, (dt, date)):
+            return v.strftime("%Y-%m-%d")
+        return str(v).strip()
+
+    # --- delimited text -------------------------------------------------
+    if name.endswith((".csv", ".tsv", ".txt")):
+        text = raw.decode("utf-8-sig", errors="replace")
+        first_line = text.split("\n")[0]
+        delim = "\t" if (name.endswith(".tsv") or "\t" in first_line) else ","
+        table = list(csv.reader(io.StringIO(text), delimiter=delim))
+        grid = [[clean(c) for c in row] for row in table]
+        sheet_name = file.filename or "csv"
+    else:
+        from openpyxl import load_workbook
+        # Read straight from memory. Writing the upload to a path built from
+        # file.filename would let a crafted name like "../../etc/x" escape the
+        # temp directory, and openpyxl is happy with a file-like object.
+        try:
+            wb = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
+            sheet_name = sheet if sheet in wb.sheetnames else wb.sheetnames[0]
+            ws = wb[sheet_name]
+            grid = [[clean(c) for c in row]
+                    for row in ws.iter_rows(values_only=True)]
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(400, f"Could not read file: {e}")
+
+    # --- locate the header row -------------------------------------------
+    header_idx = None
+    for i, row in enumerate(grid[:15]):
+        lowered = [c.lower() for c in row]
+        if "range" in lowered and "row" in lowered:
+            header_idx = i
+            break
+    if header_idx is None:
+        raise HTTPException(
+            400,
+            "No header row with 'Range' and 'Row' found in the first 15 rows. "
+            "Check the right sheet was picked.")
+
+    headers = list(grid[header_idx])
+    rows: list[dict[str, str]] = []
+    for raw_row in grid[header_idx + 1:]:
+        if not any(c for c in raw_row):
+            continue
+        rec = {h: (raw_row[i] if i < len(raw_row) else "")
+               for i, h in enumerate(headers) if h}
+        # A row with neither Range nor Row is a footer or a stray note.
+        if not (rec.get("Range") or rec.get("Row")):
+            continue
+        rows.append(rec)
+
+    return {
+        "sheet": sheet_name,
+        "headers": [h for h in headers if h],
+        "rows": rows,
+        "count": len(rows),
+    }
 
 
 @app.post("/admin/init")
@@ -346,9 +432,13 @@ async def admin_init(
     """Step 1 — initialise a nursery from an uploaded PRISM export."""
     if not nursery_code.strip():
         raise HTTPException(400, "Nursery code required")
-    # Save the uploaded file to a temp path, then call the script function.
-    tmp = Path(tempfile.gettempdir()) / f"prism_{nursery_code}.xlsx"
-    tmp.write_bytes(await file.read())
+    # init_nursery takes a path, so this one has to hit disk. The name is
+    # generated rather than built from nursery_code — a value like
+    # "../../etc/x" would otherwise escape the temp directory.
+    with tempfile.NamedTemporaryFile(prefix="prism_", suffix=".xlsx",
+                                     delete=False) as handle:
+        handle.write(await file.read())
+        tmp = Path(handle.name)
     try:
         from nursery_init import init_nursery
         result = init_nursery(tmp, nursery_code, sheet)
@@ -549,14 +639,60 @@ def save_field_map(code: str, payload: FieldMapPayload) -> dict:
 
 
 # Root = explanatory "How it works" page; PWA workflow lives at /app.
+class SheetSpec(BaseModel):
+    """One tab's worth of grid, as the browser is displaying it."""
+    name: str
+    headers: list[str] = []
+    rows: list[list[Any]] = []
+    # [[label, span], ...] — the merged band above the headers.
+    bands: list[list[Any]] | None = None
+    # "<row>,<col>" (zero-based, data rows only) -> "#rrggbb" / {bold, italic}
+    colours: dict[str, str] = {}
+    styles: dict[str, dict] = {}
+    widths: list[float] = []
+
+
+class ExportRequest(BaseModel):
+    filename: str = "nursery-export"
+    sheets: list[SheetSpec] = []
+
+
+@app.post("/export/xlsx")
+def export_xlsx(req: ExportRequest) -> Response:
+    """Build a real .xlsx from what the grid is showing.
+
+    The browser has no spreadsheet writer and we are not bundling one; the
+    backend already has openpyxl, so the grid posts its rows and gets a file
+    back. Used for single-tab export, whole-book export, and the Bartender
+    packet list.
+    """
+    payload = req.model_dump()
+    try:
+        data = workbook_bytes(payload)
+    except ValueError as e:
+        # An empty export is a mistake worth naming, not a blank file.
+        raise HTTPException(400, str(e))
+
+    stem = re.sub(r'[\\/:*?"<>|]+', "-", req.filename).strip() or "nursery-export"
+    return Response(
+        content=data,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        headers={"Content-Disposition": f'attachment; filename="{stem}.xlsx"'},
+    )
+
+
 @app.get("/")
 def landing() -> FileResponse:
     return FileResponse(PWA_DIR / "how-it-works.html")
 
 
 @app.get("/app")
-def app_index() -> FileResponse:
-    return FileResponse(PWA_DIR / "index.html")
+def app_index() -> RedirectResponse:
+    # The page uses relative paths so the same folder can be hosted as static
+    # files (SharePoint). Served from /static/ those resolve; from /app they
+    # would not, so send the browser there rather than serve it here.
+    return RedirectResponse("/static/index.html")
 
 
 # Keep the older URL working as an alias.

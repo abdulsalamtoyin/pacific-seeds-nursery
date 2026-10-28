@@ -19,6 +19,16 @@ from openpyxl.workbook.defined_name import DefinedName
 from openpyxl.worksheet.datavalidation import DataValidation
 from openpyxl.worksheet.table import Table, TableStyleInfo
 
+# Run either as `python excel_workflow/build_workbooks.py` (script mode, which
+# puts excel_workflow/ on sys.path rather than poc/) or as
+# `python -m excel_workflow.build_workbooks`. The guard makes the package
+# import below resolve in both cases.
+if __package__ in (None, ""):
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from excel_workflow.spec.loader import load_spec, tabs_for
+
 ROOT = Path(__file__).resolve().parent
 OUT = ROOT / "output"
 SEEDS = ROOT / "seeds"
@@ -114,8 +124,139 @@ def button_cell(ws, cell_range: str, label: str, macro: str,
         c.comment = Comment(f"{description}\n\n(Double-click to run: {macro})", "PS Workflow")
 
 
+# ---------- Shared tab layouts ----------
+REPLACEMENT_HEADERS = [
+    "Stage", "Timestamp", "Plot", "Material ID", "Source ID",
+    "QR", "Reason", "Technician", "Split no.", "Status",
+]
+
+STATUS_DEFAULT = "Waiting decision"
+REPLACEMENT_LAST_ROW = 500
+
+GROWTH_STAGES = [
+    ("Seedling",      "FEC000"),
+    ("Vegetative",    "A9D08E"),
+    ("Heading",       "FF6B6B"),
+    ("Flowering",     "ADD8E6"),
+    ("Grain filling", "FFFF99"),
+    ("Harvest",       "CCFFCC"),
+    ("Post Harvest",  "CCCCFF"),
+]
+
+
+def decorate_replacements_sheet(ws, header_row_no: int) -> None:
+    """Dropdowns, QR width and default status for the merged log.
+
+    Stage is what distinguishes a packeting replacement from a planting error,
+    so one row format now covers what used to be two tabs.
+    """
+    first = header_row_no + 1
+    qr_col = get_column_letter(REPLACEMENT_HEADERS.index("QR") + 1)
+    status_col = get_column_letter(REPLACEMENT_HEADERS.index("Status") + 1)
+    stage_col = get_column_letter(REPLACEMENT_HEADERS.index("Stage") + 1)
+
+    # The QR payload is a full comma-separated record, not a short code.
+    ws.column_dimensions[qr_col].width = 150
+
+    stage_dv = DataValidation(
+        type="list", formula1='"Packeting,Planting"', allow_blank=True)
+    status_dv = DataValidation(
+        type="list", formula1=f'"{STATUS_DEFAULT},Changes made in PRISM"',
+        allow_blank=True)
+    ws.add_data_validation(stage_dv)
+    ws.add_data_validation(status_dv)
+
+    stage_dv.add(f"{stage_col}{first}:{stage_col}{REPLACEMENT_LAST_ROW}")
+    status_dv.add(f"{status_col}{first}:{status_col}{REPLACEMENT_LAST_ROW}")
+
+    for row in range(first, REPLACEMENT_LAST_ROW + 1):
+        ws[f"{status_col}{row}"] = STATUS_DEFAULT
+
+
+def build_nursery_data_sheet(ws) -> None:
+    """The printable front page. Labels only — values are filled in by hand.
+
+    Layout mirrors the 'Nursery data' tab of the client's File for Toyin.xlsx,
+    including the deliberately blank rows 3-4 and right-hand column.
+    """
+    spec = load_spec()
+
+    ws.merge_cells("A1:D1")
+    ws["A1"] = "R&D Fieldbook - Grain Sorghum"
+    ws["A1"].font = Font(bold=True, size=20)
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    # Rows 3 and 4 are merged but deliberately empty — the nursery name and
+    # block order are written in by the breeder at print time.
+    for row in (3, 4):
+        ws.merge_cells(start_row=row, start_column=2, end_row=row, end_column=3)
+        ws.cell(row=row, column=2).alignment = Alignment(horizontal="center")
+    ws.cell(row=3, column=2).font = Font(bold=True, size=16)
+    ws.cell(row=4, column=2).font = Font(size=12)
+    ws.cell(row=4, column=2).border = Border(bottom=THIN)
+
+    for offset, label in enumerate(spec["nursery_data_labels"]):
+        row = 5 + offset
+        cell = ws.cell(row=row, column=2, value=label)
+        cell.font = Font(size=12)
+        cell.border = Border(bottom=THIN)
+        ws.cell(row=row, column=3).border = Border(bottom=THIN)
+
+    ws.merge_cells("A24:D24")
+
+    for col, width in spec["nursery_data_widths"].items():
+        ws.column_dimensions[col].width = width
+
+
+def build_grouped_sheet(ws, title: str) -> None:
+    """Operations and Comments share one bordered Stage x Group table.
+
+    The client asked to keep the existing structure and only rename the three
+    free-text columns, so the growth-stage rows stay.
+    """
+    ws.merge_cells("A1:D1")
+    ws["A1"] = title
+    ws["A1"].font = Font(bold=True, size=16, color=PS_NAVY)
+    ws["A1"].alignment = Alignment(horizontal="center")
+
+    headers = ["Stage", "Group 1", "Group 2", "Group 3"]
+    for col, name in enumerate(headers, start=1):
+        cell = ws.cell(row=2, column=col, value=name)
+        cell.font = Font(bold=True, color=PS_NAVY)
+        cell.alignment = Alignment(horizontal="center")
+
+    ws.column_dimensions["A"].width = 18
+    for letter in ("B", "C", "D"):
+        ws.column_dimensions[letter].width = 34
+
+    last_row = 2 + len(GROWTH_STAGES)
+    for i, (stage, rgb) in enumerate(GROWTH_STAGES, start=3):
+        cell = ws.cell(row=i, column=1, value=stage)
+        cell.font = Font(bold=True, color=PS_NAVY)
+        cell.fill = PatternFill("solid", fgColor=rgb)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        for col in (2, 3, 4):
+            ws.cell(row=i, column=col).alignment = Alignment(
+                wrap_text=True, vertical="top")
+        ws.row_dimensions[i].height = 40
+
+    for row in range(2, last_row + 1):
+        for col in range(1, 5):
+            ws.cell(row=row, column=col).border = Border(
+                top=THIN, bottom=THIN, left=THIN, right=THIN)
+
+
 # ---------- Build: Nursery Template ----------
-def build_nursery_template() -> Path:
+def build_nursery_template(nursery_types: list[str] | None = None,
+                           planting_dates: int = 1) -> Path:
+    """Build the template workbook for one nursery.
+
+    The sheet set and its order come from nursery_spec.json, so the tabs here
+    and the SHEET_* constants the VBA uses cannot drift apart.
+    """
+    nursery_types = nursery_types or ["Selection"]
+    sheet_names = tabs_for(nursery_types, planting_dates)
+
     wb = Workbook()
     wb.remove(wb.active)
 
@@ -145,54 +286,46 @@ def build_nursery_template() -> Path:
     prep_steps = [
         ("▶ 1. Initialise from PRISM export",
          "btnInitNursery",
-         "Reads the PRISM 'Nursery site' export sheet, creates all workflow tabs, "
-         "and sets up the workbook structure."),
-        ("▶ 2. Build Nursery list",
-         "btnBuildNurseryList",
-         "Picks all unique Source IDs from Nursery site, sorted A→Z. Adds Repeats "
-         "and Qty Required (1.4 × Repeats). Asks for qty per packet."),
-        ("▶ 3. Design Field Map",
-         "btnDesignFieldMap",
-         "Opens the Field Map tab; manually mark spike numbers, forward/reverse runs."),
-        ("▶ 4. Generate Packet Prep & QR labels",
-         "btnGeneratePacketPrep",
-         "Runs the 13-step Packet Prep workflow: sort, insert Plot/Spike/Rack/QR columns, "
-         "merge fields, filter rows, fill spike numbers."),
-        ("▶ 5. Sort packets for racking (LSD Radix)",
+         "Asks for the nursery code, validates that PRISM data is pasted into the "
+         "Nursery site tab, stamps Nursery data."),
+        ("▶ 2. Generate ALL workbook tabs",
+         "btnGenerateAllTabs",
+         "Builds every output tab from the pasted PRISM data: Map, Material Map, "
+         "Packet Prep (with QR text + colored digits), Nursery list, Fieldbook, "
+         "BC0 labels, Date recording, Pulling bags, TFMSA Spray plots, Hy Heights."),
+        ("▶ 3. Sort packets for racking (LSD Radix)",
          "btnSortForRacking",
-         "Performs the Least-Significant-Digit Radix sort so packets stack in rack order."),
+         "Re-sorts Packet Prep by Rack Order ↑ then Spike ↑ — the physical "
+         "pick-up order for racking."),
     ]
 
     field_steps = [
-        ("▶ 6. Record replacement (Packeting/Planting)",
+        ("▶ 4. Record replacement (Packeting/Planting)",
          "btnAddReplacement",
          "Opens a dialog to capture a replacement event with stage dropdown."),
-        ("▶ 7. Record planting error",
+        ("▶ 5. Record planting error",
          "btnAddPlantingError",
-         "Logs a planting error in the Replacements and errors tab."),
-        ("▶ 8. Spray track + date recording",
+         "Logs a planting error in the Replacements done tab."),
+        ("▶ 6. Spray track + date recording",
          "btnRecordSpray",
          "Adds a TFMSA / IMI / HPPD spray application with date."),
-        ("▶ 9. AB bag pulling",
+        ("▶ 7. AB bag pulling",
          "btnRecordABPull",
          "Records pulled bags with date and count."),
     ]
 
     post_steps = [
-        ("▶ 10. Pull updated Nursery site from PRISM",
+        ("▶ 8. Pull updated Nursery site from PRISM",
          "btnImportUpdated",
-         "Imports the refreshed PRISM export into the 'Updated nursery site' tab."),
-        ("▶ 11. Generate Fieldbook",
-         "btnGenerateFieldbook",
-         "Runs the Fieldbook template VBA: reorders columns, adds Bagging Info/Comments, "
-         "serpentine sort, sets landscape print layout."),
-        ("▶ 12. Refresh dashboard",
+         "After Breeder updates PRISM with replacements + errors, paste the "
+         "refreshed Nursery site export and re-run Step 2 to regenerate every tab."),
+        ("▶ 9. Refresh dashboard",
          "btnRefreshDashboard",
-         "Updates the local stats panel below."),
-        ("▶ 13. Push to Hub",
+         "Recalculates the live stats panel below."),
+        ("▶ 10. Push to Hub",
          "btnPushToHub",
-         "Writes this nursery's summary to the shared registry.csv so the Nursery Hub "
-         "workbook sees it on its dashboard."),
+         "Writes this nursery's summary to the shared registry.csv so the Nursery "
+         "Hub workbook sees it on its dashboard."),
     ]
 
     def render_step_block(start_row: int, steps: list, color: str) -> int:
@@ -244,12 +377,13 @@ def build_nursery_template() -> Path:
     metrics = [
         ("Total packets", "DASH_TotalPackets", "=IFERROR(COUNTA('Nursery site'!A:A)-1,0)"),
         ("Unique source IDs", "DASH_UniqueSources", "=IFERROR(COUNTA('Nursery list'!A:A)-1,0)"),
-        ("Replacements logged", "DASH_Replacements",
-         "=IFERROR(COUNTIF('Replacements and errors'!D:D,\"replacement\"),0)"),
+        # Replacements and planting errors now share one tab, split by Stage.
+        ("Packeting replacements", "DASH_Replacements",
+         "=IFERROR(COUNTIF('Replacements and Errors'!A:A,\"Packeting\"),0)"),
         ("Planting errors logged", "DASH_PlantingErrors",
-         "=IFERROR(COUNTIF('Replacements and errors'!D:D,\"planting_error\"),0)"),
-        ("Spray events", "DASH_SprayEvents",
-         "=IFERROR(COUNTA('Additionals'!A:A)-2,0)"),
+         "=IFERROR(COUNTIF('Replacements and Errors'!A:A,\"Planting\"),0)"),
+        ("Awaiting decision", "DASH_AwaitingDecision",
+         "=IFERROR(COUNTIF('Replacements and Errors'!J:J,\"Waiting decision\"),0)"),
         ("Last synced to Hub", "DASH_LastSync", "Never"),
     ]
     for i, (label, name, formula) in enumerate(metrics):
@@ -303,94 +437,116 @@ def build_nursery_template() -> Path:
     settings.column_dimensions["B"].width = 42
     settings.column_dimensions["C"].width = 55
 
-    # ---- Data tabs (the 12 workflow tabs) ----
-    workflow_tabs = [
-        ("Nursery site", "Paste the PRISM export here (or click Step 1).",
-         ["Range", "Row", "Material ID", "Source ID", "CMS reaction", "Generation",
-          "Inbred Code", "Pedigree", "Hybrid Code", "Trait Name", "Plant #",
-          "Loc Seq#", "SubSeq Flag", "Entry Book Project", "Entry Book Name", "Entry #"]),
-        ("Field Map", "Manual grid. Mark range/row numbers and spike zones here.", []),
-        ("Material Map", "Paste PRISM Material Map here.", []),
-        ("Nursery data",
-         "Header info — nursery name, season, breeder. Populated from Settings.", []),
-        ("Nursery list", "Auto-built by Step 2 from Nursery site.",
-         ["Source ID", "Repeats", "Qty Required", "Inbred Code", "Hybrid Code",
-          "Treatment", "Notes"]),
-        ("Packet prep", "Auto-built by Step 4.",
-         ["QR payload", "Plot", "Range", "Row", "Spike", "Rack Order",
-          "Material ID", "Source ID", "Generation", "CMS reaction", "Comments"]),
-        ("Replacements and errors", "Log of all replacements and planting errors.",
-         ["Captured At", "Tech", "Plot", "Type", "Stage", "Original Source ID",
-          "Replaced With", "Severity", "Note", "Status"]),
-        ("Updated nursery site", "Drop the refreshed PRISM export here for step 10.", []),
-        ("Fieldbook", "Auto-built by Step 11 — print-ready.",
-         ["Range", "Row", "R_R", "Crossed bags", "Bagging Info", "Material ID",
-          "Source ID", "Gen", "CMS", "Comments"]),
-        ("Operations", "Growth stage tracker, colour-coded.",
-         ["Stage", "Plan", "Done date", "Comments"]),
-        ("Comments", "Free-form team notes.", ["Date", "Tech", "Topic", "Comment"]),
-        ("Additionals", "TFMSA spray, AB date recording, AB bag pulling.",
-         ["Captured At", "Tech", "Plot", "Operation", "Product / Event",
-          "Date", "Count", "Note"]),
+    # ---- Tab definitions, keyed by base name ----
+    # The workbook's sheet list comes from nursery_spec.json; this maps each
+    # name to its subtitle and headers. 'Packet Prep N' resolves to the
+    # 'Packet Prep' entry, so every split shares one definition.
+    PRISM_HEADERS = [
+        "Range", "Row", "Material ID", "Inbred Code", "Source ID", "CMS reaction",
+        "Generation", "Comments", "Pedigree", "Hybrid Code", "Trait Name",
+        "Plant #", "Loc Seq#", "SubSeq Flag", "Entry Book Project",
+        "Entry Book Name", "Entry #",
     ]
 
-    for name, subtitle, headers in workflow_tabs:
+    tab_defs = {
+        "Nursery site": (
+            "Paste the PRISM export here (headers row 5, data row 6+). Step 2 reads this.",
+            PRISM_HEADERS),
+        "Material Map": (
+            "Auto-built by Step 2. Range x Row grid carrying Material ID, "
+            "Inbred code and Hybrid code.", []),
+        "Field Map": (
+            "Same grid as Material Map, without material information. Use the "
+            "wizard button to set planting dates, spikes and run direction.", []),
+        "Nursery data": (
+            "Printable front page. Fill the right-hand column in by hand.", []),
+        "Packet Prep": (
+            "Auto-built by Step 2. QR CODE text + colored digit columns. "
+            "Feed this tab to your barcode printer machine.",
+            ["QR CODE", "Range", "Row", "Plot", "SPIKE#", "RACK ORDER",
+             "Split no.",
+             "Thousands/Black", "Hundreds/Red", "Tens/Green", "Ones/Blue",
+             "Material ID", "Inbred Code", "Source ID", "CMS reaction",
+             "Generation", "Comments", "Pedigree", "Hybrid Code",
+             "Trait Name", "Plant #", "Loc Seq#", "SubSeq Flag",
+             "Entry Book Project", "Entry Book Name", "Entry #"]),
+        "Nursery list": (
+            "Auto-built by Step 2 — unique Source IDs ascending, with repeats and qty.",
+            ["", "", "Source ID (Hybrid Code)", "Repeats", "Qty Required",
+             "Inbred Code", "Hybrid Code", "Notes"]),
+        "Replacements and Errors": (
+            "Log replacements and planting errors here. Stage marks which.",
+            REPLACEMENT_HEADERS),
+        "Updated nursery site": (
+            "Paste the re-downloaded PRISM export here, then run the Fieldbook "
+            "button on this tab.",
+            PRISM_HEADERS),
+        "Fieldbook": (
+            "Auto-built from Updated nursery site — print-ready field reference.",
+            []),
+        "Date recording": (
+            "AB nurseries only. S 1 and S 2 hold day-of-month numbers.", []),
+        "Operations": (
+            "Growth-stage tracker — fill in each group per stage.", []),
+        "Comments": (
+            "Free-form team notes, same layout as Operations.", []),
+        # --- nursery-type extras -------------------------------------------
+        "BC0 labels": (
+            "Auto-built by Step 2 — BC* generations only (TFMSA / Pollen tracking).",
+            ["Range", "Row", "Crossed bags", "TFMSA", "Pollen", "TFMSA/Pollen",
+             "Nursery Name", "Bagging Info", "Material ID", "Source ID", "Gen",
+             "CMS", "Comments"]),
+        "Pulling bags": (
+            "Auto-built by Step 2 — same population as Date recording, bag-pulling tracker.",
+            ["Range", "Row", "Plot", "1", "2",
+             "Material ID", "Source ID", "Gen", "CMS", "Comments"]),
+        "BC0 TFMSA record": (
+            "Day 7 / Day 10 / Day 13 TFMSA spray date observations.", []),
+        "TFMSA Spray plots": (
+            "Auto-built by Step 2 — BC* plots that get TFMSA.",
+            ["Range", "Row", "Source ID", "CMS", "Gen"]),
+        "Hy Heights": (
+            "Auto-built by Step 2 — F1 hybrids height tracker.",
+            ["Range", "Row", "Height in CM", "Material ID", "Source ID", "Gen", "CMS"]),
+    }
+
+    for name in sheet_names:
+        if name in ("Home", "Settings"):
+            continue                       # already created above
+        base = "Packet Prep" if name.startswith("Packet Prep ") else name
+        subtitle, headers = tab_defs[base]
+
         ws = wb.create_sheet(name)
         ws.sheet_view.showGridLines = False
+
+        # Tabs whose layout is dictated by the client's sample bypass the
+        # standard banner+header treatment entirely.
+        if base == "Nursery data":
+            build_nursery_data_sheet(ws)
+            continue
+        if base in ("Operations", "Comments"):
+            build_grouped_sheet(
+                ws,
+                "Operations Overview" if base == "Operations" else "Field Comments")
+            continue
+
         n = banner(ws, name, subtitle, cols=max(8, len(headers) or 8))
         if headers:
             header_row(ws, n, headers)
-            # Width hints
             for i, _ in enumerate(headers, start=1):
                 ws.column_dimensions[get_column_letter(i)].width = 16
-            # Freeze under the header
             ws.freeze_panes = ws.cell(row=n + 1, column=1)
         else:
-            ws.cell(row=n, column=1, value="(no auto-headers — edit freely)").font = Font(
+            ws.cell(row=n, column=1,
+                    value="(auto-built — do not edit by hand)").font = Font(
                 italic=True, color=PS_MUTED)
 
-    # Pre-fill Operations with growth stages
-    ops = wb["Operations"]
-    stage_colors = [
-        ("Seedling",      "FEC000"),
-        ("Vegetative",    "A9D08E"),
-        ("Heading",       "FF6B6B"),
-        ("Flowering",     "ADD8E6"),
-        ("Grain filling", "FFFF99"),
-        ("Harvest",       "CCFFCC"),
-        ("Post Harvest",  "CCCCFF"),
-    ]
-    # Operations banner ends at row 4, headers at 5
-    for i, (stage, rgb) in enumerate(stage_colors, start=6):
-        c = ops.cell(row=i, column=1, value=stage)
-        c.font = Font(bold=True, color=PS_NAVY)
-        c.fill = PatternFill("solid", fgColor=rgb)
-        c.alignment = Alignment(horizontal="center", vertical="center")
-        c.border = Border(top=THIN, bottom=THIN, left=THIN, right=THIN)
-        for col in (2, 3, 4):
-            ops.cell(row=i, column=col).border = Border(
-                top=THIN, bottom=THIN, left=THIN, right=THIN)
-            ops.cell(row=i, column=col).alignment = Alignment(
-                wrap_text=True, vertical="top")
-        ops.row_dimensions[i].height = 40
+        if base == "Replacements and Errors":
+            decorate_replacements_sheet(ws, n)
 
-    # Set up data validation on Replacements: Type column
-    rep = wb["Replacements and errors"]
-    dv_type = DataValidation(type="list",
-        formula1='"replacement,planting_error,spray,ab_pull,note"', allow_blank=True)
-    dv_type.add(f"D6:D5000")
-    rep.add_data_validation(dv_type)
-    dv_stage = DataValidation(type="list",
-        formula1='"Packeting,Planting"', allow_blank=True)
-    dv_stage.add(f"E6:E5000")
-    rep.add_data_validation(dv_stage)
-    dv_status = DataValidation(type="list",
-        formula1='"Open,In PRISM,Closed"', allow_blank=True)
-    dv_status.add(f"J6:J5000")
-    rep.add_data_validation(dv_status)
-
-    # Re-order tabs: Home first
-    wb.move_sheet("Home", offset=-wb.sheetnames.index("Home"))
+    # Settings is machinery, not a workflow tab.
+    for hidden_name in load_spec()["hidden"]:
+        wb[hidden_name].sheet_state = "hidden"
 
     OUT.mkdir(exist_ok=True)
     path = OUT / "Nursery_Template.xlsx"
@@ -532,7 +688,10 @@ def _maybe_bake(xlsx_path: Path, label: str) -> Path:
               f"keeping .xlsx only. Run extract_seed.py once to lock in VBA.")
         return xlsx_path
 
-    from bake_vba import bake_vba
+    try:
+        from excel_workflow.bake_vba import bake_vba
+    except ImportError:            # script mode puts excel_workflow/ on sys.path
+        from bake_vba import bake_vba
     xlsm = xlsx_path.with_suffix(".xlsm")
     bake_vba(xlsx_path, seed, xlsm)
     print(f"     ✓ Baked VBA into {xlsm.name} (seed: {seed.name})")

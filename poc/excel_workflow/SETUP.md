@@ -86,6 +86,83 @@ the compiled VBA, not the source text.
 
 ---
 
+## Changing VBA — the full loop
+
+Any change to a `.bas`, `.cls`, or the workbook spec has to travel this route.
+There is no way to shorten it on macOS; see the note below.
+
+```bash
+cd poc
+
+# 1. Tab names, columns and print settings live in one JSON file.
+#    Edit excel_workflow/spec/nursery_spec.json, then regenerate the VBA
+#    constants. Never hand-edit SpecConstants.bas — this is its only writer.
+.venv/bin/python -m excel_workflow.gen_spec_constants
+
+# 2. Rebuild the workbooks (bakes the *current* seed, which is still stale
+#    at this point — that's expected).
+.venv/bin/python excel_workflow/build_workbooks.py
+
+# 3. Verify the Python side still agrees with the spec.
+.venv/bin/pytest tests/ -q
+```
+
+Then, in Excel:
+
+4. Open `excel_workflow/output/Nursery_Template.xlsm`.
+5. `Alt+F11` → Insert → Module → paste the whole of `vba/bootstrap.bas`.
+6. Run `InstallAll` (`F5`). Point the folder picker at `excel_workflow/vba/`.
+7. Watch the Immediate window (`Ctrl+G`) for per-module results. `InstallAll`
+   imports `SpecConstants`, `NurseryTemplate`, `FieldbookColouring`, builds the
+   `frmSelectColumns` UserForm, and then deletes itself.
+8. Save (keep `.xlsm`).
+
+Back in the shell:
+
+```bash
+# 9. Snapshot the compiled VBA so future builds are fully baked.
+.venv/bin/python excel_workflow/extract_seed.py \
+    excel_workflow/output/Nursery_Template.xlsm
+```
+
+### Why the manual step cannot be automated on macOS
+
+`install_excel_macros.py` exists for this, and it **cannot work on a Mac**.
+Excel's AppleScript dictionary has no `VBProject` term, so xlwings fails with:
+
+```
+AttributeError: Unknown property, element or command: 'VBProject'
+```
+
+That is a missing API, not a permissions problem — no combination of "Trust
+access to the VBA project object model" and macOS Automation settings will
+change it. The script now detects Darwin and says so instead of sending you
+round the settings loop.
+
+VBA running *inside* Excel is a different matter: it can reach
+`ThisWorkbook.VBProject` when VBA trust is enabled, which is exactly why the
+bootstrap route works where the external script cannot.
+
+### If the UserForm fails to build
+
+`CreateColourForm` in `bootstrap.bas` builds `frmSelectColumns`
+programmatically, because a VBA `.frm` cannot carry its controls without a
+companion binary `.frx` — MSForms stores every control inside that blob, so a
+text-only `.frm` in git would import an empty form.
+
+If the Immediate window shows a `Designer` error on this Excel build, use the
+fallback documented in the comment above that sub: create the form once by
+hand in the VBE (label `lblGroupBy`, combo `cmbGroupBy` with `Style` set to
+`fmStyleDropDownList`, button `cmdApply`), Export it, commit the resulting
+`.frm` **and** `.frx` into `vba/`, and replace the body of `CreateColourForm`
+with:
+
+```vb
+ThisWorkbook.VBProject.VBComponents.Import folder & "frmSelectColumns.frm"
+```
+
+---
+
 ## The fastest install — `install.command` + 4 keystrokes
 
 > **Mac reality check:** Microsoft Excel for Mac does not allow external tools

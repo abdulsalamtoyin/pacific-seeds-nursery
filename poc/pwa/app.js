@@ -1,1168 +1,2466 @@
-// Sorghum Nursery PWA — single-screen replacement capture.
-// Storage: IndexedDB (manifest cache + offline event outbox).
-// Scanning: native BarcodeDetector when available; falls back to jsQR via dynamic import.
+// Nursery Workbook — desktop app.
+//
+// This mirrors the Excel workbook: the same tabs in the same order, driven by
+// the same nursery_spec.json, using the same ordering rules. Where the
+// workbook has a macro button, this has a button that does the same thing.
+//
+// Tab list comes from nursery-spec.js and the rules from nursery-algos.js —
+// both generated/ported from the Python, and pinned by tests/test_js_parity.py.
 
-const $ = sel => document.querySelector(sel);
-const uuid = () =>
-  (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+import { SPEC, tabsFor } from "./nursery-spec.js";
+import {
+  spikeForRow, runDirection, bandForRow, parityForRow,
+  serpentineByRange, serpentineTwoRowBands, assignSplits,
+  assignMonth, trendCounts, packetPrepOrder, rackDigits,
+} from "./nursery-algos.js";
+import * as store from "./store.js";
+import { grid } from "./grid.js";
+import { todayISO } from "./grid-core.js";
+import { download, exportBartender } from "./exporter.js";
+import { loadExcelJS } from "./excel-lib.js";
+import { readPrism } from "./prism-reader.js";
+import * as auth from "./auth.js";
+import { createDrive } from "./onedrive.js";
+import { createSync } from "./sync.js";
+import {
+  createFolderDrive, folderSupported, pickFolder, canWrite, idbMeta,
+} from "./folder-drive.js";
+import { serialise, parseFile, overwrittenCodes, loadInto } from "./backup.js";
 
-// ---------- IndexedDB helpers ----------
-const DB_NAME = "sorghum-nursery";
-const DB_VERSION = 2;
+const $ = (sel) => document.querySelector(sel);
 
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (ev) => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("manifest"))
-        db.createObjectStore("manifest", { keyPath: "uuid" });
-      if (!db.objectStoreNames.contains("meta"))
-        db.createObjectStore("meta", { keyPath: "key" });
-      if (!db.objectStoreNames.contains("outbox"))
-        db.createObjectStore("outbox", { keyPath: "uuid" });
-      if (!db.objectStoreNames.contains("sent"))
-        db.createObjectStore("sent", { keyPath: "uuid" });
-      // v2: index manifest by nursery_code for fast per-nursery deletion.
-      const tx = ev.target.transaction;
-      const ms = tx.objectStore("manifest");
-      if (!ms.indexNames.contains("by_nursery"))
-        ms.createIndex("by_nursery", "nursery_code", { unique: false });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
+const STATUS_DEFAULT = "Waiting decision";
+const STATUS_OPTIONS = [STATUS_DEFAULT, "Changes made in PRISM"];
+// Stage came off both logs on request — the two tabs are the distinction.
 
-async function idbByIndex(store, indexName, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const idx = db.transaction(store).objectStore(store).index(indexName);
-    const req = idx.getAll(key);
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
+const QR_ORIGINAL = "QR code (original entry)";
+const QR_REPLACED = "QR code (replaced entry)";
 
-async function idbDeleteByIndex(store, indexName, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    const idx = tx.objectStore(store).index(indexName);
-    const cur = idx.openCursor(key);
-    cur.onsuccess = () => {
-      const c = cur.result;
-      if (c) { c.delete(); c.continue(); }
-    };
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-async function idbAll(store) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store).objectStore(store).getAll();
-    tx.onsuccess = () => resolve(tx.result);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function idbGet(store, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store).objectStore(store).get(key);
-    tx.onsuccess = () => resolve(tx.result);
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function idbPut(store, value) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).put(value);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function idbClear(store) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).clear();
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function idbDelete(store, key) {
-  const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(store, "readwrite");
-    tx.objectStore(store).delete(key);
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-
-// ---------- UI status ----------
-function setOnline(online) {
-  const el = $("#onlineStatus");
-  el.textContent = online ? "online" : "offline";
-  el.classList.toggle("warn", !online);
-}
-window.addEventListener("online", () => { setOnline(true); trySync(); });
-window.addEventListener("offline", () => setOnline(false));
-
-async function refreshOutboxCount() {
-  const items = await idbAll("outbox");
-  $("#outboxStatus").textContent = `outbox: ${items.length}`;
-  $("#outboxStatus").classList.toggle("warn", items.length > 0);
-}
-
-// ---------- Nursery loading ----------
-async function loadedNurseryCodes() {
-  const all = await idbAll("manifest");
-  const codes = new Set();
-  for (const p of all) if (p.nursery_code) codes.add(p.nursery_code);
-  return [...codes].sort();
-}
-
-async function loadNurseryList() {
-  try {
-    const r = await fetch("/nurseries");
-    const codes = await r.json();
-    const sel = $("#nurseryPick");
-    sel.innerHTML = '<option value="">— choose nursery —</option>' +
-      codes.map(c => `<option>${c}</option>`).join("");
-  } catch {
-    $("#manifestHint").innerHTML = '<span class="err">Could not reach backend. Are you offline?</span>';
-  }
-  const meta = await idbGet("meta", "current");
-  if (meta && meta.tech_id) $("#techId").value = meta.tech_id;
-  await renderLoadedList();
-  if (meta && meta.nursery_code) {
-    await activate(meta.nursery_code);
-  }
-}
-
-async function renderLoadedList() {
-  const codes = await loadedNurseryCodes();
-  const meta = await idbGet("meta", "current");
-  const list = $("#loadedList");
-  if (codes.length === 0) {
-    list.innerHTML = '<div class="hint">None cached yet. Pick one below and tap Load.</div>';
-    return;
-  }
-  list.innerHTML = "";
-  for (const code of codes) {
-    const items = await idbByIndex("manifest", "by_nursery", code);
-    const isActive = meta && meta.nursery_code === code;
-    const el = document.createElement("div");
-    el.className = "nurs" + (isActive ? " active" : "");
-    el.innerHTML = `<b>${code}</b> <span class="count">${items.length} pkts</span>`;
-    const useBtn = document.createElement("button");
-    useBtn.textContent = isActive ? "✓ active" : "use";
-    useBtn.disabled = isActive;
-    useBtn.onclick = () => activate(code);
-    el.appendChild(useBtn);
-    const dropBtn = document.createElement("button");
-    dropBtn.textContent = "✕";
-    dropBtn.title = "Drop from device cache";
-    dropBtn.onclick = async () => {
-      if (!confirm(`Drop cached packets for ${code}?`)) return;
-      await idbDeleteByIndex("manifest", "by_nursery", code);
-      if (isActive) await idbDelete("meta", "current");
-      await renderLoadedList();
-      await refreshActiveBar();
-    };
-    el.appendChild(dropBtn);
-    list.appendChild(el);
-  }
-}
-
-async function activate(code) {
-  const meta = (await idbGet("meta", "current")) || {};
-  await idbPut("meta", { key: "current",
-    nursery_code: code,
-    tech_id: $("#techId").value.trim() || meta.tech_id || "",
-  });
-  await renderLoadedList();
-  await refreshActiveBar();
-  await refreshServerFeed();
-  $("#scanCard").classList.remove("hidden");
-}
-
-async function refreshActiveBar() {
-  const meta = await idbGet("meta", "current");
-  if (!meta || !meta.nursery_code) {
-    $("#activeBar").classList.add("hidden");
-    $("#scanCard").classList.add("hidden");
-    $("#coachBar").classList.add("hidden");
-    return;
-  }
-  $("#activeBar").classList.remove("hidden");
-  $("#activeNursery").textContent = meta.nursery_code;
-  $("#activeTech").textContent = meta.tech_id || "—";
-  await coachRender();
-}
-
-$("#switchBtn").addEventListener("click", () => {
-  $("#setupCard").scrollIntoView({ behavior: "smooth" });
-});
-
-$("#loadBtn").addEventListener("click", async () => {
-  const code = $("#nurseryPick").value;
-  const tech = $("#techId").value.trim();
-  if (!code) return alert("Pick a nursery first.");
-  if (!tech) return alert("Enter your name or initials.");
-  $("#manifestHint").textContent = "Downloading manifest…";
-  try {
-    const r = await fetch(`/nursery/${encodeURIComponent(code)}/manifest`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    await idbDeleteByIndex("manifest", "by_nursery", code);
-    for (const p of data.packets) await idbPut("manifest", { ...p, nursery_code: code });
-    $("#manifestHint").innerHTML =
-      `<span class="ok">Cached ${data.packet_count} packets for ${code}. You can go offline now.</span>`;
-    await activate(code);
-  } catch (err) {
-    $("#manifestHint").innerHTML = `<span class="err">Failed: ${err.message}</span>`;
-  }
-});
-
-$("#resetBtn").addEventListener("click", async () => {
-  if (!confirm("Forget all cached nurseries and outbox? Unsynced events will be lost.")) return;
-  await idbClear("manifest"); await idbClear("meta"); await idbClear("outbox"); await idbClear("sent");
-  // Forgetting nursery also returns the user to the landing/intro page.
-  location.href = "/";
-});
-
-// ---------- QR scanning ----------
-let scanStream = null;
-let scanLoop = null;
-
-$("#scanBtn").addEventListener("click", startScan);
-$("#stopScanBtn").addEventListener("click", stopScan);
-$("#findBtn").addEventListener("click", () => {
-  $("#findArea").classList.toggle("hidden");
-  $("#scanArea").classList.add("hidden");
-  stopScan();
-  if (!$("#findArea").classList.contains("hidden")) {
-    $("#plotInput").focus();
-    renderFindResults("");
-  }
-});
-$("#plotInput").addEventListener("input", (e) => renderFindResults(e.target.value.trim()));
-$("#manualGoBtn").addEventListener("click", () => handlePayload($("#manualInput").value.trim()));
-
-async function renderFindResults(q) {
-  const meta = await idbGet("meta", "current");
-  if (!meta) return;
-  const items = await idbByIndex("manifest", "by_nursery", meta.nursery_code);
-  const ql = q.toLowerCase();
-  const hits = !q ? items.slice(0, 12)
-    : items.filter(p =>
-        (p.plot || "").toLowerCase().includes(ql) ||
-        (p.material_id || "").toLowerCase().includes(ql) ||
-        (p.source_id || "").toLowerCase().includes(ql)
-      ).slice(0, 30);
-  const box = $("#findResults");
-  if (hits.length === 0) { box.innerHTML = '<div class="hint">No matches.</div>'; return; }
-  box.innerHTML = "";
-  for (const p of hits) {
-    const div = document.createElement("div");
-    div.className = "hit";
-    div.innerHTML = `<b>Plot ${p.plot}</b> · Spike ${p.spike} · Rack ${p.rack_order}
-                     <div class="hint">${p.material_id || "—"} · ${p.source_id || "—"}</div>`;
-    div.onclick = () => { $("#findArea").classList.add("hidden"); showPacket(p); };
-    box.appendChild(div);
-  }
-}
-
-function explainCameraError(err) {
-  // 1. Insecure context: no mediaDevices at all.
-  const insecure = !window.isSecureContext ||
-                   !navigator.mediaDevices ||
-                   !navigator.mediaDevices.getUserMedia;
-  if (insecure) {
-    const host = location.hostname;
-    return (
-      `The browser is blocking the camera because this page isn't on HTTPS.\n\n` +
-      `You're at: ${location.protocol}//${host}\n\n` +
-      `Two fixes:\n` +
-      `  • On a phone: ask IT/dev to start the server with HTTPS\n` +
-      `    (see poc/scripts/make_cert.sh in the project), OR\n` +
-      `  • On your laptop, open the app via http://localhost:8000/\n` +
-      `    (localhost is exempt from the HTTPS rule).\n\n` +
-      `Meanwhile, use "Find by plot" instead — it works without the camera.`
-    );
-  }
-  // 2. Specific DOMException names.
-  switch (err && err.name) {
-    case "NotAllowedError":
-    case "PermissionDeniedError":
-      return "Camera permission was denied. Open your browser's site settings " +
-             "for this page and re-allow camera access, then refresh.";
-    case "NotFoundError":
-    case "DevicesNotFoundError":
-      return "No camera found on this device. Use 'Find by plot' instead.";
-    case "NotReadableError":
-    case "TrackStartError":
-      return "Camera is in use by another app. Close other apps using the camera " +
-             "(FaceTime, Zoom, Snap…), then try again.";
-    case "OverconstrainedError":
-      return "The requested camera (rear/environment) isn't available. Trying any camera.";
-    default:
-      return `Camera error: ${(err && err.message) || err}`;
-  }
-}
-
-async function startScan() {
-  $("#scanArea").classList.remove("hidden");
-  // Pre-flight: secure context required.
-  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
-    alert(explainCameraError(null));
-    $("#scanArea").classList.add("hidden");
-    return;
-  }
-  try {
-    scanStream = await navigator.mediaDevices.getUserMedia({
-      video: { facingMode: { ideal: "environment" } }, audio: false,
-    });
-  } catch (err) {
-    if (err.name === "OverconstrainedError") {
-      try {
-        scanStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
-      } catch (err2) {
-        alert(explainCameraError(err2));
-        $("#scanArea").classList.add("hidden");
-        return;
-      }
-    } else {
-      alert(explainCameraError(err));
-      $("#scanArea").classList.add("hidden");
-      return;
-    }
-  }
-
-  const video = $("#scanner");
-  video.srcObject = scanStream;
-  try { await video.play(); } catch {}
-
-  if ("BarcodeDetector" in window) {
-    const detector = new BarcodeDetector({ formats: ["qr_code"] });
-    scanLoop = setInterval(async () => {
-      try {
-        const codes = await detector.detect(video);
-        if (codes && codes[0]) { stopScan(); handlePayload(codes[0].rawValue); }
-      } catch {}
-    }, 250);
-  } else {
-    try {
-      const jsQR = (await import("https://cdn.jsdelivr.net/npm/jsqr@1.4.0/+esm")).default;
-      const canvas = document.createElement("canvas");
-      const ctx = canvas.getContext("2d");
-      scanLoop = setInterval(() => {
-        if (video.readyState < 2) return;
-        canvas.width = video.videoWidth; canvas.height = video.videoHeight;
-        ctx.drawImage(video, 0, 0);
-        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const code = jsQR(img.data, img.width, img.height);
-        if (code) { stopScan(); handlePayload(code.data); }
-      }, 250);
-    } catch (err) {
-      alert("This browser can't decode QR codes and the jsQR fallback failed to load (offline?). Use 'Find by plot'.");
-      stopScan();
-    }
-  }
-}
-
-function stopScan() {
-  if (scanLoop) { clearInterval(scanLoop); scanLoop = null; }
-  if (scanStream) { scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
-  $("#scanArea").classList.add("hidden");
-}
-
-// ---------- Packet lookup ----------
-async function handlePayload(raw) {
-  if (!raw) return;
-  const m = raw.match(/^SNUR:([^:]+):([a-zA-Z0-9-]+)$/);
-  if (!m) return alert(`Not a Sorghum packet QR:\n${raw}`);
-  const [_, nurseryCode, packetUuid] = m;
-  const meta = await idbGet("meta", "current");
-  if (!meta) return alert("No active nursery. Load one first.");
-  if (meta.nursery_code !== nurseryCode) {
-    // Offer to auto-switch if the QR's nursery is one we've cached.
-    const cached = await loadedNurseryCodes();
-    if (cached.includes(nurseryCode)) {
-      if (!confirm(`This QR is for ${nurseryCode}. Switch to it?`)) return;
-      await activate(nurseryCode);
-    } else {
-      return alert(`This QR is for nursery '${nurseryCode}' but you haven't loaded it.`);
-    }
-  }
-  const packet = await idbGet("manifest", packetUuid);
-  if (!packet || packet.nursery_code !== nurseryCode) {
-    return alert(`Packet ${packetUuid} not found in cached manifest.`);
-  }
-  showPacket(packet);
-}
-
-// ---------- Event-type forms ----------
-// Each entry: { label, fields: [{name, label, type, options?, required?, default?}], saveLabel }
-const EVENT_TYPES = {
-  replacement: {
-    label: "Replacement",
-    saveLabel: "Save replacement",
-    fields: [
-      { name: "replaced_with", label: "Replaced with (new Source ID)",
-        type: "text", required: true, placeholder: "e.g. AUGT1-25W-AB-0011-B-0012" },
-      { name: "stage", label: "Stage", type: "select",
-        options: ["Packeting", "Planting"], default: "Packeting" },
-    ],
-  },
-  planting_error: {
-    label: "Planting error",
-    saveLabel: "Save planting error",
-    fields: [
-      { name: "error_kind", label: "What went wrong?", type: "select",
-        options: ["Missed plot", "Wrong packet planted", "Damaged packet",
-                  "Mixed packets", "Other"] },
-      { name: "severity", label: "Severity", type: "select",
-        options: ["Low", "Medium", "High"], default: "Medium" },
-    ],
-  },
-  spray: {
-    label: "Spray applied",
-    saveLabel: "Save spray",
-    fields: [
-      { name: "product", label: "Product", type: "select",
-        options: ["TFMSA", "IMI", "HPPD", "Other"] },
-      { name: "applied_on", label: "Date applied", type: "date",
-        default: () => new Date().toISOString().slice(0, 10) },
-      { name: "rate", label: "Rate (optional)", type: "text", placeholder: "e.g. 200 mL/ha" },
-    ],
-  },
-  ab_pull: {
-    label: "AB bag pulled",
-    saveLabel: "Save AB pull",
-    fields: [
-      { name: "bag_count", label: "Bags pulled", type: "number", default: 1 },
-      { name: "pulled_on", label: "Date pulled", type: "date",
-        default: () => new Date().toISOString().slice(0, 10) },
-    ],
-  },
-  date_record: {
-    label: "Date record",
-    saveLabel: "Save date record",
-    fields: [
-      { name: "event_label", label: "What happened?", type: "select",
-        options: ["Heading", "Flowering", "Bagging", "Crossing", "Harvest"] },
-      { name: "occurred_on", label: "Date", type: "date",
-        default: () => new Date().toISOString().slice(0, 10) },
-    ],
-  },
-  note: {
-    label: "Note",
-    saveLabel: "Save note",
-    fields: [],
-  },
-};
-
-function renderForm(typeKey) {
-  const def = EVENT_TYPES[typeKey];
-  const root = $("#formFields");
-  root.innerHTML = "";
-  for (const f of def.fields) {
-    const id = `f_${f.name}`;
-    const label = document.createElement("label");
-    label.htmlFor = id;
-    label.textContent = f.label;
-    root.appendChild(label);
-    let el;
-    if (f.type === "select") {
-      el = document.createElement("select");
-      el.innerHTML = f.options.map(o => `<option>${o}</option>`).join("");
-    } else if (f.type === "date") {
-      el = document.createElement("input");
-      el.type = "date";
-    } else if (f.type === "number") {
-      el = document.createElement("input");
-      el.type = "number"; el.inputMode = "numeric";
-    } else {
-      el = document.createElement("input");
-      el.type = "text";
-      if (f.placeholder) el.placeholder = f.placeholder;
-    }
-    el.id = id;
-    el.name = f.name;
-    el.dataset.required = f.required ? "1" : "";
-    if (f.default !== undefined) {
-      el.value = typeof f.default === "function" ? f.default() : f.default;
-    }
-    root.appendChild(el);
-    const sp = document.createElement("div");
-    sp.style.height = "10px";
-    root.appendChild(sp);
-  }
-  $("#saveBtn").textContent = def.saveLabel;
-}
-
-function showPacket(p) {
-  $("#packetCard").classList.remove("hidden");
-  $("#packetCard").scrollIntoView({ behavior: "smooth" });
-  $("#packetPlot").textContent = `Plot ${p.plot}`;
-  $("#packetMeta").innerHTML =
-    `<b>Material:</b> ${p.material_id || "—"}<br/>` +
-    `<b>Source:</b> ${p.source_id || "—"}<br/>` +
-    `<b>Pedigree:</b> ${p.pedigree || "—"}`;
-  $("#packetPills").innerHTML = [
-    `Spike ${p.spike}`, `Rack ${p.rack_order}`,
-    p.generation && `Gen ${p.generation}`, p.cms && `CMS ${p.cms}`,
-  ].filter(Boolean).map(t => `<span>${t}</span>`).join("");
-  $("#packetCard").dataset.uuid = p.uuid;
-  $("#packetCard").dataset.plot = p.plot;
-  $("#packetCard").dataset.source = p.source_id || "";
-  $("#packetCard").dataset.type = "";
-  $("#formArea").classList.add("hidden");
-  $("#formFields").innerHTML = "";
-  $("#noteInput").value = "";
-  $("#saveHint").textContent = "";
-  document.querySelectorAll(".type-btn").forEach(b => b.classList.remove("active"));
-}
-
-// Wire up the event-type chooser.
-document.querySelectorAll(".type-btn").forEach(btn => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".type-btn").forEach(b => b.classList.remove("active"));
-    btn.classList.add("active");
-    const t = btn.dataset.type;
-    $("#packetCard").dataset.type = t;
-    renderForm(t);
-    $("#formArea").classList.remove("hidden");
-    const first = $("#formFields").querySelector("input,select");
-    if (first) setTimeout(() => first.focus(), 50);
-  });
-});
-
-$("#cancelBtn").addEventListener("click", () => {
-  $("#packetCard").classList.add("hidden");
-});
-
-$("#saveBtn").addEventListener("click", async () => {
-  const card = $("#packetCard");
-  const typeKey = card.dataset.type;
-  if (!typeKey) return alert("Pick an event type first.");
-  const def = EVENT_TYPES[typeKey];
-
-  // Collect & validate fields.
-  const payload = { plot: card.dataset.plot };
-  if (typeKey === "replacement") payload.original_source = card.dataset.source;
-  for (const f of def.fields) {
-    const el = document.getElementById(`f_${f.name}`);
-    const v = (el.value ?? "").toString().trim();
-    if (f.required && !v) return alert(`Please fill in: ${f.label}`);
-    payload[f.name] = v || null;
-  }
-  const noteVal = $("#noteInput").value.trim();
-  if (noteVal) payload.note = noteVal;
-
-  const meta = await idbGet("meta", "current");
-  const ev = {
-    uuid: uuid(),
-    packet_uuid: card.dataset.uuid,
-    nursery_code: meta.nursery_code,
-    type: typeKey,
-    payload,
-    tech_id: meta.tech_id,
-    captured_at: new Date().toISOString(),
-  };
-  await idbPut("outbox", ev);
-  await refreshOutboxCount();
-  await renderRecent();
-  $("#saveHint").innerHTML = '<span class="ok">Saved locally. Will sync when online.</span>';
-  card.classList.add("hidden");
-  trySync();
-  await coachAutoDetect("event_" + typeKey);
-});
-
-// ---------- Sync ----------
-$("#syncBtn").addEventListener("click", trySync);
-
-async function trySync() {
-  const items = await idbAll("outbox");
-  if (items.length === 0) {
-    $("#syncBtn").textContent = "Sync now (nothing to send)";
-    setTimeout(() => $("#syncBtn").textContent = "Sync now", 1500);
-    return;
-  }
-  try {
-    const r = await fetch("/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ events: items }),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const result = await r.json();
-    for (const ev of items) { await idbPut("sent", ev); await idbDelete("outbox", ev.uuid); }
-    await refreshOutboxCount();
-    $("#syncBtn").textContent =
-      `Synced ${result.accepted} (${result.duplicates} dup)`;
-    setTimeout(() => $("#syncBtn").textContent = "Sync now", 2000);
-    await refreshServerFeed();
-    if (result.accepted > 0) await coachAutoDetect("sync_success");
-  } catch (err) {
-    $("#syncBtn").textContent = `Sync failed: ${err.message}`;
-    setTimeout(() => $("#syncBtn").textContent = "Sync now", 2500);
-  }
-}
-
-// ---------- Recent ----------
-function summariseEvent(e) {
-  const p = e.payload || {};
-  switch (e.type) {
-    case "replacement":    return `${p.original_source || "?"} → ${p.replaced_with || "?"} (${p.stage || ""})`;
-    case "planting_error": return `${p.error_kind || "Error"} · ${p.severity || ""}`;
-    case "spray":          return `${p.product || "Spray"} on ${p.applied_on || "?"}${p.rate ? " · " + p.rate : ""}`;
-    case "ab_pull":        return `${p.bag_count || 1} bag(s) pulled ${p.pulled_on || ""}`;
-    case "date_record":    return `${p.event_label || "Event"} on ${p.occurred_on || "?"}`;
-    case "note":           return p.note || "(no text)";
-    default:               return JSON.stringify(p);
-  }
-}
-
-let feedMode = "all"; // "all" | "device"
-
-$("#feedTabDevice").addEventListener("click", () => { feedMode = "device";
-  $("#feedTabDevice").classList.add("active"); $("#feedTabAll").classList.remove("active");
-  renderRecent(); });
-$("#feedTabAll").addEventListener("click", () => { feedMode = "all";
-  $("#feedTabAll").classList.add("active"); $("#feedTabDevice").classList.remove("active");
-  renderRecent(); });
-
-function renderEventLine(e) {
-  const def = EVENT_TYPES[e.type];
-  const typeLabel = def ? def.label : e.type;
-  const plot = e.plot || e.payload?.plot || "?";
-  return `<div class="ev">
-    <b>Plot ${plot}</b> · ${typeLabel}
-    <div class="hint">${summariseEvent(e)}</div>
-    <div class="hint">${new Date(e.captured_at).toLocaleString()} · ${e.tech_id || ""}</div>
-  </div>`;
-}
-
-async function refreshServerFeed() {
-  if (feedMode === "all") await renderRecent();
-}
-
-async function renderRecent() {
-  const list = $("#recentList");
-  const meta = await idbGet("meta", "current");
-  let items = [];
-  if (feedMode === "device") {
-    items = [...(await idbAll("outbox")), ...(await idbAll("sent"))]
-      .filter(e => !meta || e.nursery_code === meta.nursery_code)
-      .sort((a, b) => b.captured_at.localeCompare(a.captured_at))
-      .slice(0, 20);
-  } else {
-    if (!meta) { list.innerHTML = '<div class="hint">Pick an active nursery.</div>'; return; }
-    try {
-      const r = await fetch(`/nursery/${encodeURIComponent(meta.nursery_code)}/events?limit=20`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      items = await r.json();
-    } catch {
-      // Offline fallback: show device-side.
-      list.innerHTML = '<div class="hint">Offline — showing device only.</div>';
-      items = [...(await idbAll("outbox")), ...(await idbAll("sent"))]
-        .filter(e => !meta || e.nursery_code === meta.nursery_code)
-        .sort((a, b) => b.captured_at.localeCompare(a.captured_at))
-        .slice(0, 20);
-    }
-  }
-  if (items.length === 0) { list.innerHTML = '<div class="hint">Nothing yet.</div>'; return; }
-  list.innerHTML = items.map(renderEventLine).join("");
-}
-
-// ==================== Admin panel ====================
-$("#admToggle").addEventListener("click", () => {
-  const btn = $("#admToggle");
-  const open = btn.getAttribute("aria-expanded") === "true";
-  btn.setAttribute("aria-expanded", String(!open));
-  $("#admBody").classList.toggle("hidden", open);
-  if (!open) {
-    // Lazy-load nursery list + map when panel opens
-    loadNurseryListAdmin();
-    loadFieldMap();
-    const meta = idbGet("meta", "current");
-    meta.then(m => { if (m?.nursery_code) $("#initCode").value = m.nursery_code; });
-  }
-});
-
-// ----- Step 1: Initialise from PRISM upload -----
-// When a file is picked, inspect it and populate the sheet dropdown.
-$("#initFile").addEventListener("change", async (e) => {
-  const file = e.target.files[0];
-  const sel = $("#initSheet");
-  const hint = $("#initSheetHint");
-  if (!file) {
-    sel.innerHTML = '<option value="">— pick a file first —</option>';
-    sel.disabled = true;
-    hint.textContent = "";
-    return;
-  }
-  $("#initFileHint").innerHTML = `<span class="ok">${file.name} — reading sheets…</span>`;
-  sel.innerHTML = '<option>scanning…</option>';
-  sel.disabled = true;
-  hint.textContent = "";
-  try {
-    const fd = new FormData();
-    fd.append("file", file);
-    const r = await fetch("/admin/inspect", { method: "POST", body: fd });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0,180)}`);
-    const data = await r.json();
-    sel.innerHTML = "";
-    for (const s of data.sheets) {
-      const opt = document.createElement("option");
-      opt.value = s.name;
-      const tag = s.has_prism_headers ? "  ✓ PRISM headers" : "";
-      opt.textContent = `${s.name}  (${s.rows} rows × ${s.cols} cols)${tag}`;
-      sel.appendChild(opt);
-    }
-    if (data.suggested) sel.value = data.suggested;
-    sel.disabled = false;
-    $("#initFileHint").innerHTML =
-      `<span class="ok">${file.name} — ${data.sheets.length} sheet(s) found.</span>`;
-    const picked = data.sheets.find(s => s.name === sel.value);
-    if (picked && picked.headers_preview.length) {
-      hint.innerHTML =
-        `<span class="hint">Headers: <i>${picked.headers_preview.join(" · ")}</i></span>`;
-    }
-  } catch (err) {
-    sel.innerHTML = '<option value="">(could not read sheets)</option>';
-    sel.disabled = false;
-    $("#initFileHint").innerHTML = `<span class="err">${err.message}</span>`;
-  }
-});
-
-// When the user picks a different sheet, update the headers preview line.
-$("#initSheet").addEventListener("change", async () => {
-  const file = $("#initFile").files[0];
-  if (!file) return;
-  const name = $("#initSheet").value;
-  if (!name) return;
-  // Reuse the result of the last inspect (cached on the select element).
-  // We re-fetch here only if no cached info; cheaper to just call again.
-});
-
-$("#initBtn").addEventListener("click", async () => {
-  const code = $("#initCode").value.trim();
-  const sheet = ($("#initSheet").value || "").trim() || "Sheet1";
-  const file = $("#initFile").files[0];
-  if (!code) return alert("Enter a nursery code first.");
-  if (!file) return alert("Pick a PRISM export .xlsx file.");
-  if (!sheet) return alert("Pick which sheet inside the file holds the PRISM data.");
-  $("#initStatus").innerHTML = '<span class="ok">Uploading and processing…</span>';
-  try {
-    const fd = new FormData();
-    fd.append("nursery_code", code);
-    fd.append("sheet", sheet);
-    fd.append("file", file);
-    const r = await fetch("/admin/init", { method: "POST", body: fd });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0,200)}`);
-    const data = await r.json();
-    $("#initStatus").innerHTML =
-      `<span class="ok">✓ ${data.packet_count} packets imported. ` +
-      `${data.spike_count} spike(s) from "${data.map_source}".</span>`;
-    // Refresh the nursery list so this one shows up immediately
-    await loadNurseryList();
-    await loadNurseryListAdmin();
-    await loadFieldMap();
-    await coachAutoDetect("init_success");
-  } catch (err) {
-    $("#initStatus").innerHTML = `<span class="err">Failed: ${err.message}</span>`;
-  }
-});
-
-// ----- Step 2: Nursery list -----
-async function loadNurseryListAdmin() {
-  const meta = await idbGet("meta", "current");
-  if (!meta) { $("#listResults").textContent = "Pick a nursery first."; return; }
-  try {
-    const r = await fetch(`/nursery/${encodeURIComponent(meta.nursery_code)}/list`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    if (data.items.length === 0) {
-      $("#listResults").textContent = "No source IDs found.";
-      return;
-    }
-    let html = `<div class="hint" style="margin-bottom:6px">` +
-               `${data.items.length} unique source IDs. ` +
-               `Qty/packet = ${data.qty_per_packet}. ` +
-               `Bulk-flagged when reps > ${data.bulk_threshold}.</div>`;
-    html += `<table><thead><tr><th>Source ID</th><th>Reps</th><th>Qty req.</th>` +
-            `<th>Inbred</th><th>Hybrid</th></tr></thead><tbody>`;
-    for (const it of data.items) {
-      html += `<tr class="${it.bulk ? 'bulk' : ''}">` +
-              `<td><b>${it.source_id}</b></td><td>${it.reps}</td>` +
-              `<td>${it.qty_required}</td>` +
-              `<td>${it.inbred_code}</td><td>${it.hybrid_code}</td></tr>`;
-    }
-    html += "</tbody></table>";
-    $("#listResults").innerHTML = html;
-    $("#listResults")._items = data.items; // stash for CSV
-    $("#listResults")._meta = data;
-    await coachAutoDetect("list_loaded");
-  } catch (err) {
-    $("#listResults").innerHTML = `<span class="err">${err.message}</span>`;
-  }
-}
-$("#listLoadBtn").addEventListener("click", loadNurseryListAdmin);
-$("#listCsvBtn").addEventListener("click", async () => {
-  const items = $("#listResults")._items;
-  if (!items) return alert("Click Refresh list first.");
-  const csv = "Source ID,Repeats,Qty Required,Inbred,Hybrid,Bulk\n" +
-    items.map(i => [i.source_id, i.reps, i.qty_required,
-                    i.inbred_code, i.hybrid_code, i.bulk ? "BULK" : ""].join(",")).join("\n");
-  try { await navigator.clipboard.writeText(csv);
-    alert("CSV copied to clipboard."); }
-  catch { alert("Couldn't copy. CSV:\n\n" + csv.slice(0, 500)); }
-});
-
-// ----- Step 4 / 11: downloads -----
-$("#wbBtn").addEventListener("click", async () => {
-  const meta = await idbGet("meta", "current");
-  if (!meta) return alert("Pick a nursery first.");
-  const url = `/nursery/${encodeURIComponent(meta.nursery_code)}/workbook.xlsx`;
-  $("#downloadHint").innerHTML =
-    '<span class="ok">Downloading workbook — open the Packet Prep tab to view QR CODE column.</span>';
-  window.location.href = url;
-  await coachAutoDetect("workbook_downloaded");
-});
-$("#fbBtn").addEventListener("click", async () => {
-  const meta = await idbGet("meta", "current");
-  if (!meta) return alert("Pick a nursery first.");
-  $("#downloadHint").innerHTML = '<span class="ok">Generating fieldbook…</span>';
-  try {
-    const r = await fetch(`/admin/fieldbook/${encodeURIComponent(meta.nursery_code)}`, {
-      method: "POST"
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const blob = await r.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${meta.nursery_code}_fieldbook.xlsx`;
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-    $("#downloadHint").innerHTML =
-      `<span class="ok">Downloaded ${meta.nursery_code}_fieldbook.xlsx</span>`;
-    await coachAutoDetect("fieldbook_downloaded");
-  } catch (err) {
-    $("#downloadHint").innerHTML = `<span class="err">${err.message}</span>`;
-  }
-});
-
-// ----- Field Map editor -----
-async function loadFieldMap() {
-  const meta = await idbGet("meta", "current");
-  if (!meta) { $("#mapEditor").innerHTML = '<div class="hint">Pick a nursery first.</div>'; return; }
-  try {
-    const r = await fetch(`/nursery/${encodeURIComponent(meta.nursery_code)}/map`);
-    if (!r.ok) throw new Error(`HTTP ${r.status}`);
-    const data = await r.json();
-    renderMapEditor(data.spikes);
-    $("#mapStatus").innerHTML =
-      data.source === "saved"
-      ? `<span class="hint">Saved layout (${data.updated_at})</span>`
-      : `<span class="hint">Derived from current packet data — save to lock in.</span>`;
-  } catch (err) {
-    $("#mapEditor").innerHTML = `<span class="err">${err.message}</span>`;
-  }
-}
-function renderMapEditor(spikes) {
-  const root = $("#mapEditor");
-  root.innerHTML = "";
-  // Header row
-  const hdr = document.createElement("div");
-  hdr.className = "spike-row";
-  hdr.innerHTML = `<span class="lbl">Spike</span><span class="lbl">Row from</span>` +
-                  `<span class="lbl">Row to</span><span></span>`;
-  root.appendChild(hdr);
-  for (const s of spikes) {
-    addSpikeRow(s.spike, s.row_min, s.row_max);
-  }
-  if (spikes.length === 0) addSpikeRow(1, 1, 10);
-}
-function addSpikeRow(spike, rmin, rmax) {
-  const row = document.createElement("div");
-  row.className = "spike-row";
-  row.innerHTML = `
-    <input type="number" min="1" value="${spike}" data-k="spike" />
-    <input type="number" min="1" value="${rmin}" data-k="row_min" />
-    <input type="number" min="1" value="${rmax}" data-k="row_max" />
-    <button class="rm" title="Remove">×</button>
-  `;
-  row.querySelector(".rm").onclick = () => row.remove();
-  $("#mapEditor").appendChild(row);
-}
-$("#mapAddBtn").addEventListener("click", () => {
-  // Default the new spike's range to start one above the highest existing row_max
-  const rows = [...$("#mapEditor").querySelectorAll(".spike-row")].slice(1);
-  let nextSpike = 1, nextStart = 1;
-  rows.forEach(r => {
-    const s = parseInt(r.querySelector('[data-k="spike"]').value, 10) || 0;
-    const mx = parseInt(r.querySelector('[data-k="row_max"]').value, 10) || 0;
-    if (s >= nextSpike) nextSpike = s + 1;
-    if (mx >= nextStart) nextStart = mx + 1;
-  });
-  addSpikeRow(nextSpike, nextStart, nextStart + 9);
-});
-$("#mapSaveBtn").addEventListener("click", async () => {
-  const meta = await idbGet("meta", "current");
-  if (!meta) return alert("Pick a nursery first.");
-  const rows = [...$("#mapEditor").querySelectorAll(".spike-row")].slice(1);
-  const spikes = rows.map(r => ({
-    spike: parseInt(r.querySelector('[data-k="spike"]').value, 10),
-    row_min: parseInt(r.querySelector('[data-k="row_min"]').value, 10),
-    row_max: parseInt(r.querySelector('[data-k="row_max"]').value, 10),
-  })).filter(s => s.spike > 0 && s.row_min > 0 && s.row_max >= s.row_min);
-  if (spikes.length === 0) return alert("Add at least one spike.");
-  $("#mapStatus").innerHTML = '<span class="ok">Saving…</span>';
-  try {
-    const r = await fetch(`/nursery/${encodeURIComponent(meta.nursery_code)}/map`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ spikes }),
-    });
-    if (!r.ok) throw new Error(`HTTP ${r.status}: ${(await r.text()).slice(0,200)}`);
-    const data = await r.json();
-    $("#mapStatus").innerHTML =
-      `<span class="ok">✓ Saved. ${data.packets_reassigned} packets reassigned across ` +
-      `${data.spike_count} spike(s).` +
-      (data.off_map > 0 ? ` ${data.off_map} packets are off-map (Spike 0).` : "") +
-      `</span>`;
-    await coachAutoDetect("map_saved");
-    // Refresh the cached manifest so scans reflect the new spike numbers
-    try {
-      const m = await fetch(`/nursery/${encodeURIComponent(meta.nursery_code)}/manifest`);
-      if (m.ok) {
-        const md = await m.json();
-        await idbDeleteByIndex("manifest", "by_nursery", meta.nursery_code);
-        for (const p of md.packets) await idbPut("manifest", { ...p, nursery_code: meta.nursery_code });
-      }
-    } catch {}
-  } catch (err) {
-    $("#mapStatus").innerHTML = `<span class="err">${err.message}</span>`;
-  }
-});
-
-// ====================================================================
-// Workflow Coach — guides users through the 13-step nursery workflow
-// ====================================================================
-const COACH_STEPS = [
-  // Phase 1 — Pre-field prep (Admin / breeder)
-  { n: 1, phase: 1, title: "Initialise from PRISM export",
-    body: "Open the Admin panel, paste the nursery code, choose the PRISM export .xlsx, and click Initialise. This creates the packet database, runs the Map parser and prepares the QR-coded packet PDF.",
-    target: "#admInitHdr", openAdmin: true, autoDone: m => !!m && m.packet_count > 0 },
-  { n: 2, phase: 1, title: "Build / review the Nursery list",
-    body: "Click Refresh list in the Admin panel. You'll see every unique Source ID with Repeats and Qty Required (1.4 × reps). BULK-flagged rows have > 10 reps.",
-    target: "#admListHdr", openAdmin: true },
-  { n: 3, phase: 1, title: "Design the Field Map",
-    body: "In the Field Map editor below, set how field rows map to spikes (e.g. Spike 1 = rows 1–10, Spike 2 = rows 11–26). Click Save to recompute Spike + Rack Order for every packet.",
-    target: "#admMapHdr", openAdmin: true },
-  { n: 4, phase: 1, title: "Download the Workbook",
-    body: "Click Download Workbook in the Admin panel. The Packet Prep tab carries the QR CODE text payload column for every packet — feed that file to your barcode-printing machine on another workstation.",
-    target: "#admDownloadsHdr", openAdmin: true },
-  { n: 5, phase: 1, title: "Sort packets for racking",
-    body: "Packets are already in LSD radix (rack ↑, spike ↑) order in the Packet prep tab of the downloaded workbook. Print or sort physically by rack order; that's the pickup sequence for racking.",
-    target: "#admDownloadsHdr", openAdmin: true, manual: true },
-  // Phase 2 — Field operations (Tech in the paddock)
-  { n: 6, phase: 2, title: "Record replacements",
-    body: "In the field: scan a packet QR (or find by plot), tap the 🔄 Replacement tile, fill stage + original source + new source, save. Works offline.",
-    target: "#scanCard", manual: true },
-  { n: 7, phase: 2, title: "Record planting errors",
-    body: "Scan / find a packet, tap the ⚠️ Planting error tile, pick severity, note what happened, save. Use during planting whenever something doesn't go to plan.",
-    target: "#scanCard", manual: true },
-  { n: 8, phase: 2, title: "Record spray applications",
-    body: "Scan / find a packet, tap 💧 Spray applied, pick product (TFMSA / IMI / HPPD), date, and rate. Run for each spray track.",
-    target: "#scanCard", manual: true },
-  { n: 9, phase: 2, title: "Record AB bag pulling",
-    body: "Scan / find a packet, tap 📦 AB bag pulled, enter bag count and date. Run during weekly AB bag pull rounds.",
-    target: "#scanCard", manual: true },
-  // Phase 3 — Post-field & sync
-  { n: 10, phase: 3, title: "Pull the updated PRISM export",
-    body: "Once the breeder has updated PRISM with replacements + errors, download the refreshed Nursery site .xlsx from PRISM. Then come back here and re-run Step 1 with the new file. Everything refreshes.",
-    target: "#admInitHdr", openAdmin: true, manual: true },
-  { n: 11, phase: 3, title: "Generate the Fieldbook",
-    body: "Click Download Fieldbook .xlsx in the Admin panel. You get a multi-tab workbook (Replacements, Planting errors, Spray log, AB bag pulling, Date recording, Notes) ready for printing or PRISM upload.",
-    target: "#admDownloadsHdr", openAdmin: true },
-  { n: 12, phase: 3, title: "Refresh the dashboard",
-    body: "Open /dashboard in another tab to see all nurseries aggregated. It auto-refreshes every page hit. Use the All-techs feed below to see today's activity for the active nursery.",
-    target: "#recentList" },
-  { n: 13, phase: 3, title: "Push to Hub",
-    body: "Already done — every event you record via the PWA is published instantly to the Hub. No manual push step. Cycle complete; you can now restart with a new nursery or move on to the next season.",
-    target: "#recentList" },
+// Timestamp, Material ID, Source ID, Technician and Split no. were dropped from
+// these tabs on request. The material fields are not lost — the export expands
+// each QR back into the full nine-column block the client's format wants, so
+// the tab stays short while the spreadsheet stays complete.
+const REPLACEMENT_COLUMNS = [
+  { key: "Plot", type: "text" },
+  { key: QR_ORIGINAL, type: "text", wide: true },
+  { key: QR_REPLACED, type: "text", wide: true },
+  { key: "Reason", type: "text" },
+  { key: "Status", type: "select", options: STATUS_OPTIONS },
 ];
 
-async function coachCurrentNursery() {
-  const meta = await idbGet("meta", "current");
-  return meta?.nursery_code || "_none_";
+const PLANTING_ERROR_COLUMNS =
+  REPLACEMENT_COLUMNS.filter((c) => c.key !== QR_REPLACED);
+
+// Paperbags & labels was added above Seedling and Post Harvest removed, both
+// on request. The stage column's own heading is left blank, as asked.
+const GROWTH_STAGES = [
+  ["Paperbags & labels", "#d9d2e9"],
+  ["Seedling", "#fec000"], ["Vegetative", "#a9d08e"], ["Heading", "#ff6b6b"],
+  ["Flowering", "#add8e6"], ["Grain filling", "#ffff99"],
+  ["Harvest", "#ccffcc"],
+];
+
+const STAGE_COLOURS = new Map(GROWTH_STAGES);
+
+// ---------------------------------------------------------------- state
+//
+// `state` is the *active* nursery, held in a rebindable binding so switching
+// nurseries is a reassignment plus a render. Views read `state.x` as before;
+// store.js owns the collection, the active pointer and persistence.
+
+let state = store.activeNursery();
+let activeTab = "Home";
+
+function save() {
+  store.save();
 }
 
-async function coachGetState() {
-  const code = await coachCurrentNursery();
-  const raw = localStorage.getItem("coach:done:" + code);
-  try { return raw ? JSON.parse(raw) : { current: 1, done: [] }; }
-  catch { return { current: 1, done: [] }; }
-}
-async function coachSetState(s) {
-  const code = await coachCurrentNursery();
-  localStorage.setItem("coach:done:" + code, JSON.stringify(s));
+/** Point `state` at whichever nursery is active now, then redraw. */
+function reloadActive() {
+  state = store.activeNursery();
+  activeTab = "Home";
+  render();
 }
 
-async function coachRender() {
-  const state = await coachGetState();
-  const bar = $("#coachBar");
-  // Show coach only when a nursery is active.
-  const meta = await idbGet("meta", "current");
-  if (!meta?.nursery_code) { bar.classList.add("hidden"); return; }
-  bar.classList.remove("hidden");
-
-  const step = COACH_STEPS.find(s => s.n === state.current) || COACH_STEPS[0];
-  $("#coachPhase").textContent = `Phase ${step.phase}`;
-  $("#coachNum").textContent = `Step ${step.n} of ${COACH_STEPS.length}`;
-  $("#coachTitle").textContent = step.title;
-  $("#coachBody").textContent = step.body;
-  const pct = ((state.done.length) / COACH_STEPS.length) * 100;
-  $("#coachBarFill").style.width = pct + "%";
-
-  $("#coachBack").disabled = state.current <= 1;
-  $("#coachNext").disabled = state.current >= COACH_STEPS.length;
-
-  // If stepper open, re-render too
-  if (!$("#coachStepper").classList.contains("hidden")) coachRenderStepper(state);
+function isType(t) {
+  return state.types.some((x) => x.toLowerCase() === t.toLowerCase());
 }
 
-function coachRenderStepper(state) {
-  const root = $("#coachStepper");
-  root.innerHTML = "";
-  for (const s of COACH_STEPS) {
-    const div = document.createElement("div");
-    let cls = "step";
-    if (state.done.includes(s.n)) cls += " done";
-    if (s.n === state.current) cls += " current active";
-    div.className = cls;
-    const mark = state.done.includes(s.n) ? "✓" : s.n;
-    div.innerHTML = `<span class="step-marker">${mark}</span>` +
-                    `<div class="step-body"><div class="step-title">${s.title}</div>` +
-                    `<div class="step-hint">Phase ${s.phase}</div></div>`;
-    div.onclick = () => coachJump(s.n);
-    root.appendChild(div);
+// ---------------------------------------------------------------- helpers
+
+function el(tag, attrs = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") node.className = v;
+    else if (k.startsWith("on")) node.addEventListener(k.slice(2), v);
+    else if (v !== null && v !== undefined) node.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+  }
+  return node;
+}
+
+function table(headers, rows, opts = {}) {
+  const thead = el("tr", {}, headers.map((h) => el("th", {}, h)));
+  const body = rows.map((cells, i) =>
+    el("tr", {}, cells.map((c, j) => {
+      const cls = opts.cellClass ? opts.cellClass(i, j, c) : "";
+      return el("td", { class: cls }, c === null || c === undefined ? "" : c);
+    })));
+  return el("div", { class: "scroll" },
+    el("table", {}, el("thead", {}, thead), el("tbody", {}, body)));
+}
+
+function pageHead(title, subtitle) {
+  return [
+    title ? el("h1", {}, title) : null,
+    subtitle ? el("p", { class: "sub" }, subtitle) : null,
+  ].filter(Boolean);
+}
+
+function emptyState(msg) {
+  return el("div", { class: "empty" }, msg);
+}
+
+// The tab on screen registers how to export itself here as it renders, so the
+// Export button in the title bar always downloads what the user is looking at.
+const SHEETS = new Map();
+
+function registerSheet(tabName, build) {
+  SHEETS.set(tabName, build);
+}
+
+/** Download the tab currently open — never the whole book. */
+function exportCurrentTab() {
+  const build = SHEETS.get(activeTab);
+  if (!build) {
+    alert(`${activeTab} has nothing to download.`);
+    return;
+  }
+  runExport("Export", async () => {
+    const sheet = build();
+    if (!sheet.rows.length) {
+      alert(`${activeTab} has no rows yet.`);
+      return;
+    }
+    // The Overview spans every nursery, so it is not named after the open one.
+    const file = activeTab === "Overview"
+      ? `Nursery overview ${todayISO()}`
+      : `${state.code || "nursery"} - ${activeTab}`;
+    await download(file, [sheet]);
+  });
+}
+
+/** A rendered grid as a sheet description, for the whole-book export. */
+function sheetOf(name, api, extra = {}) {
+  const columns = api.columns();
+  return {
+    name,
+    headers: columns.map((c) => c.label ?? c.key),
+    rows: api.rows().map((r) => columns.map((c) => r[c.key] ?? "")),
+    colours: api.colours(),
+    styles: api.styles(),
+    ...extra,
+  };
+}
+
+/** Wrap an export so a failure explains itself rather than doing nothing. */
+async function runExport(label, fn) {
+  try {
+    await fn();
+  } catch (e) {
+    alert(`${label} failed.\n\n${e.message}`);
   }
 }
 
-async function coachJump(stepNo) {
-  const state = await coachGetState();
-  state.current = stepNo;
-  await coachSetState(state);
-  await coachRender();
-  await coachScrollToTarget(stepNo);
+/**
+ * Choose rows from the rows that actually exist, rather than typing a list.
+ *
+ * Rows already claimed by an earlier planting date are shown disabled — a row
+ * in two planting dates would print packets onto the wrong split, and catching
+ * it here is friendlier than failing after the whole wizard has been filled in.
+ *
+ * @returns {Promise<number[]|null>} chosen rows, or null if cancelled.
+ */
+function pickRows(label, allRows, taken) {
+  return new Promise((resolve) => {
+    const chosen = new Set();
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const boxes = allRows.map((row) => {
+      const claimed = taken.has(row);
+      const box = el("input", { type: "checkbox" });
+      box.disabled = claimed;
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(row); else chosen.delete(row);
+      });
+      return el("label", {
+        class: "filter-row",
+        title: claimed ? "Already assigned to an earlier planting date" : "",
+        style: claimed ? "opacity:.45" : "",
+      }, box, el("span", {}, `Row ${row}`));
+    });
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal" },
+        el("h3", {}, label),
+        el("div", { class: "filter-list" }, boxes),
+        el("div", { class: "filter-actions" },
+          el("button", {
+            class: "action ghost",
+            onclick: () => {
+              boxes.forEach((l, i) => {
+                const box = l.querySelector("input");
+                if (box.disabled) return;
+                box.checked = true;
+                chosen.add(allRows[i]);
+              });
+            },
+          }, "All free rows"),
+          el("button", {
+            class: "action ghost",
+            onclick: () => {
+              boxes.forEach((l) => { l.querySelector("input").checked = false; });
+              chosen.clear();
+            },
+          }, "None")),
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => {
+              if (!chosen.size) {
+                alert("Pick at least one row.");
+                return;
+              }
+              close([...chosen].sort((a, b) => a - b));
+            },
+          }, "OK"),
+          el("button", { class: "action ghost", onclick: () => close(null) },
+            "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+  });
 }
 
-async function coachScrollToTarget(stepNo) {
-  const step = COACH_STEPS.find(s => s.n === stepNo);
-  if (!step) return;
-  // Open the admin panel if the step lives there
-  if (step.openAdmin) {
-    const btn = $("#admToggle");
-    if (btn && btn.getAttribute("aria-expanded") !== "true") btn.click();
+/**
+ * Ask for a date with a calendar, not a typed string.
+ *
+ * A typed date could arrive as 3/4/26, 03-Apr-26 or 2026-04-03, and the tabs
+ * that group by planting date would treat those as three different dates. The
+ * picker removes the ambiguity, and opens on today.
+ *
+ * @returns {Promise<string|null>} ISO YYYY-MM-DD, or null if cancelled.
+ */
+function pickDate(label, initial) {
+  return new Promise((resolve) => {
+    const input = el("input", {
+      class: "f",
+      type: "date",
+      value: initial || todayISO(),
+    });
+
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal" },
+        el("h3", {}, label),
+        input,
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => close(input.value || null),
+          }, "OK"),
+          el("button", {
+            class: "action ghost",
+            onclick: () => close(null),
+          }, "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+    input.focus();
+  });
+}
+
+function num(v) {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  return Number.isFinite(n) ? n : 0;
+}
+
+function plotOf(r) {
+  return `${num(r.Range)}_${num(r.Row)}`;
+}
+
+// The QR payload is plot,material,inbred,source,cms,gen,comments.
+// Format is fixed — printed labels depend on it.
+function qrText(r) {
+  return [plotOf(r), r["Material ID"], r["Inbred Code"], r["Source ID"],
+    r["CMS reaction"], r.Generation, r.Comments]
+    .map((v) => v ?? "").join(",");
+}
+
+function splitForRow(row) {
+  const hit = state.fieldMap.find((e) => e.row === row);
+  if (!hit) return 1;      // before the wizard runs, everything is split 1
+  const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
+  return dops.indexOf(hit.dop) + 1;
+}
+
+/**
+ * Seed needed for a Source ID: repeats x the seed quantity per plot.
+ *
+ * The rate comes from Field Map once planting has been set up, and falls back
+ * to 1.4 g until then. Kept as a function so the column can derive it live —
+ * it used to be baked in when the tab was built, so editing Repeats left the
+ * quantity behind at its old value.
+ */
+function qtyRequired(repeats) {
+  const n = Number(String(repeats ?? "").trim());
+  if (!Number.isFinite(n) || n <= 0) return "";
+  return (n * seedRate()).toFixed(1);
+}
+
+/** Grams per plot: whatever Field Map was given, else the 1.4 g default. */
+function seedRate() {
+  const rate = Number(String(state.seedQty ?? "").trim());
+  return Number.isFinite(rate) && rate > 0 ? rate : 1.4;
+}
+
+function duplicateSet(values) {
+  const seen = new Map();
+  for (const v of values) {
+    if (!v) continue;
+    seen.set(v, (seen.get(v) || 0) + 1);
   }
-  if (!step.target) return;
-  const el = document.querySelector(step.target);
-  if (!el) return;
-  // Wait a frame for the admin body to expand
-  await new Promise(r => setTimeout(r, 60));
-  el.scrollIntoView({ behavior: "smooth", block: "start" });
-  const host = el.closest(".card") || el;
-  host.classList.remove("coach-glow");
-  // restart animation
-  // eslint-disable-next-line no-unused-expressions
-  void host.offsetWidth;
-  host.classList.add("coach-glow");
+  return new Set([...seen.entries()].filter(([, n]) => n > 1).map(([v]) => v));
 }
 
-async function coachAdvance(direction = +1) {
-  const state = await coachGetState();
-  if (direction > 0 && state.current < COACH_STEPS.length) state.current += 1;
-  if (direction < 0 && state.current > 1) state.current -= 1;
-  await coachSetState(state);
-  await coachRender();
-  await coachScrollToTarget(state.current);
+// ---------------------------------------------------------------- chrome
+
+function visibleTabs() {
+  return tabsFor(
+    state.types.length ? state.types : ["Selection"],
+    Math.max(1, state.plantingDates),
+  ).filter((t) => !SPEC.hidden.includes(t));
 }
 
-async function coachMarkDone() {
-  const state = await coachGetState();
-  if (!state.done.includes(state.current)) state.done.push(state.current);
-  if (state.current < COACH_STEPS.length) state.current += 1;
-  await coachSetState(state);
-  await coachRender();
-  await coachScrollToTarget(state.current);
+function renderNav() {
+  const nav = $("#nav");
+  nav.replaceChildren();
+  nav.append(el("div", { class: "group" }, "Team"));
+  nav.append(el("a", {
+    class: activeTab === "Overview" ? "active" : "",
+    onclick: () => { activeTab = "Overview"; render(); },
+  }, "Overview"));
+  nav.append(el("div", { class: "group" }, "Workbook"));
+  for (const name of visibleTabs()) {
+    nav.append(el("a", {
+      class: name === activeTab ? "active" : "",
+      onclick: () => { activeTab = name; render(); },
+    }, name));
+  }
+  $("#topCode").textContent = state.code || "—";
+  $("#topTypes").textContent = state.types.length ? state.types.join(", ") : "";
 }
 
-// Wire buttons
-$("#coachBack").addEventListener("click", () => coachAdvance(-1));
-$("#coachNext").addEventListener("click", () => coachAdvance(+1));
-$("#coachDone").addEventListener("click", coachMarkDone);
-$("#coachExpand").addEventListener("click", async () => {
-  const stepper = $("#coachStepper");
-  const open = !stepper.classList.contains("hidden");
-  stepper.classList.toggle("hidden", open);
-  $("#coachExpand").textContent = open ? "All steps ▾" : "All steps ▴";
-  if (!open) coachRenderStepper(await coachGetState());
+function render() {
+  // Overview is not a workbook tab, so the nursery's tab list never has it.
+  if (activeTab !== "Overview" && !visibleTabs().includes(activeTab)) activeTab = "Home";
+  renderNav();
+  const main = $("#main");
+  main.replaceChildren();
+  main.scrollTop = 0;
+  const base = activeTab.startsWith("Packet Prep ") ? "Packet Prep" : activeTab;
+  (VIEWS[base] || viewMissing)(main, activeTab);
+}
+
+// ---------------------------------------------------------------- views
+
+const VIEWS = {};
+
+// Nurseries no longer overwrite each other, so Home has to show which one is
+// open and let the user move between them.
+function nurseryPicker() {
+  const all = store.listNurseries();
+  const current = store.activeId();
+
+  const select = el("select", {
+    class: "f",
+    style: "min-width:260px",
+    onchange: (e) => { store.switchNursery(e.target.value); reloadActive(); },
+  }, all.map((n) => el("option",
+    n.id === current ? { value: n.id, selected: "selected" } : { value: n.id },
+    n.code ? `${n.code}${n.types.length ? ` — ${n.types.join(", ")}` : ""}`
+      : "(untitled nursery)")));
+
+  return el("div", { class: "nursery-bar" },
+    el("label", {}, "Open nursery"),
+    select,
+    el("button", { class: "action", onclick: initNursery }, "New nursery"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        store.duplicateNursery(store.activeId());
+        reloadActive();
+      },
+    }, "Duplicate"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        const name = state.code || "this untitled nursery";
+        if (!confirm(
+          `Delete ${name}? Its PRISM data, field map, replacements and ` +
+          "comments go with it. This cannot be undone.")) return;
+        store.deleteNursery(store.activeId());
+        reloadActive();
+      },
+    }, "Delete"));
+}
+
+// ---------------------------------------------------------------- sharing
+//
+// Nurseries are shared one of two ways, both run by sync.js with the browser
+// copy as the working copy:
+//   OneDrive  — Graph, when sync-config.js holds the organisation's app
+//               registration; files go to OneDrive › Apps › <app>.
+//   Team folder — otherwise (always in the single-file build): a SharePoint
+//               folder the OneDrive desktop app syncs to each computer,
+//               reached through folder-drive.js. No Azure involved.
+
+let syncEngine = null;
+let syncDrive = null;
+let stopSync = null;
+let syncStatus = null;
+let syncPlace = "OneDrive";
+
+const SYNC_TEXT = {
+  idle: "synced",
+  syncing: "syncing…",
+  offline: "offline — saved on this computer",
+  conflict: "needs a decision (see Home)",
+  signin: "sign in again (see Home)",
+  signedout: "not signed in (see Home)",
+  reconnect: "click to reconnect (see Home)",
+  error: "sync problem (see Home)",
+};
+
+function updateSyncBadge() {
+  const badge = $("#syncBadge");
+  if (!badge) return;
+  if (!syncStatus) { badge.textContent = ""; return; }
+  const when = syncStatus.state === "idle" && syncStatus.lastSync
+    ? ` ${new Date(syncStatus.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+    : "";
+  badge.textContent = `${syncPlace}: ${SYNC_TEXT[syncStatus.state] ?? syncStatus.state}${when}`;
+}
+
+function onSyncEvent(status) {
+  syncStatus = status;
+  updateSyncBadge();
+  // Another computer's changes landed: redraw so the screen shows them.
+  // putNursery replaced the open nursery in place, so `state` is still live,
+  // but a deletion elsewhere can remove it — re-point to be safe.
+  if (status.changedLocal) state = store.activeNursery();
+  if (status.changedLocal || ["Home", "Overview"].includes(activeTab)) render();
+}
+
+/** `where` names the destination in the question asked before first sync. */
+function startSync({ drive, metaKey, author = null, where }) {
+  stopSync?.();
+  syncDrive = drive;
+  syncEngine = createSync({
+    store,
+    drive,
+    metaBackend: localStorage,
+    metaKey,
+    author,
+    onEvent: onSyncEvent,
+    // A shared computer may hold someone else's nurseries; ask before they
+    // are copied to this person's OneDrive or the team's folder.
+    confirmAdopt: async (codes) => confirm(
+      `This computer already has ${codes.length} nursery(s): ${codes.join(", ")}.\n\n` +
+      `Copy them to ${where}? Choose Cancel if they are not yours — ` +
+      "they will stay on this computer and not sync."),
+  });
+  stopSync = syncEngine.start();
+}
+
+const startGraphSync = (account) => startSync({
+  drive: createDrive({ getToken: auth.getToken }),
+  metaKey: `ps-sync-meta:${account.homeAccountId}`,
+  author: account.username,
+  where: "your OneDrive",
 });
 
-// Auto-detect completion on certain user actions (best-effort)
-async function coachAutoDetect(actionType) {
-  const state = await coachGetState();
-  const map = {
-    init_success: 1,
-    list_loaded: 2,
-    map_saved: 3,
-    workbook_downloaded: 4,
-    event_replacement: 6,
-    event_planting_error: 7,
-    event_spray: 8,
-    event_ab_pull: 9,
-    fieldbook_downloaded: 11,
-    sync_success: 13,
-  };
-  const stepNo = map[actionType];
-  if (!stepNo) return;
-  if (!state.done.includes(stepNo)) state.done.push(stepNo);
-  // If this is the current step or earlier, advance the cursor.
-  if (state.current <= stepNo && state.current < COACH_STEPS.length) {
-    state.current = stepNo + 1;
-  }
-  await coachSetState(state);
-  await coachRender();
+function stopSyncing() {
+  stopSync?.();
+  stopSync = null;
+  syncEngine = null;
+  syncDrive = null;
+  syncStatus = null;
+  updateSyncBadge();
 }
 
-// ---------- Boot ----------
-// Service worker REMOVED — the launcher is a local desktop app, always online,
-// no offline value, and the SW kept serving stale app.js after updates.
-// On first load after the update, also clean up any leftover SW + cache from
-// previous installs so users never see stale code again.
-if ("serviceWorker" in navigator) {
-  navigator.serviceWorker.getRegistrations().then(regs => {
-    if (regs.length > 0) {
-      console.log("Removing stale service worker(s):", regs.length);
-      regs.forEach(r => r.unregister());
-    }
-  }).catch(() => {});
-  if (window.caches && caches.keys) {
-    caches.keys().then(names => names.forEach(n => caches.delete(n)))
-      .catch(() => {});
+async function bootSync() {
+  if (!auth.syncConfigured()) return bootFolder();
+  try {
+    const account = await auth.initAuth();
+    if (account) startGraphSync(account);
+    else { syncStatus = { state: "signedout", conflicts: [] }; updateSyncBadge(); }
+  } catch (err) {
+    syncStatus = { state: "error", error: err.message, conflicts: [] };
+    updateSyncBadge();
   }
+  if (activeTab === "Home") render();
 }
-setOnline(navigator.onLine);
-loadNurseryList();
-refreshOutboxCount();
-renderRecent();
+
+/** One row per conflicting nursery, with the three ways to settle it. */
+function conflictRows(s, theirs) {
+  return (s.conflicts || []).map((c) => {
+    const choose = (choice) => async () => {
+      try { await syncEngine.resolve(c.id, choice); } catch (err) { alert(err.message); }
+    };
+    return el("div", { class: "btnrow" },
+      el("span", {}, `${c.code} was changed here and on another computer.`),
+      el("button", { class: "action", onclick: choose("mine") }, "Keep this computer's"),
+      el("button", { class: "action ghost", onclick: choose("theirs") }, `Keep ${theirs}`),
+      el("button", { class: "action ghost", onclick: choose("both") }, "Keep both"));
+  });
+}
+
+function syncPanel() {
+  if (!auth.syncConfigured()) return null;
+  const account = auth.currentAccount();
+  const box = el("div", { class: "home-card" }, el("h3", {}, "OneDrive"));
+
+  if (!account || syncStatus?.state === "signin") {
+    box.append(
+      el("p", {}, account
+        ? "Microsoft needs you to sign in again before nurseries can sync. " +
+          "Your work is safe on this computer meanwhile."
+        : "Sign in to keep your nurseries in your OneDrive, so they are " +
+          "backed up and open on any computer you sign in on."),
+      el("button", {
+        class: "action",
+        onclick: async () => {
+          try {
+            startGraphSync(await auth.signIn());
+          } catch (err) {
+            alert(`Sign-in did not finish.\n\n${err.message}`);
+          }
+        },
+      }, "Sign in with Microsoft"));
+    return box;
+  }
+
+  const s = syncStatus ?? { state: "syncing", conflicts: [] };
+  const last = s.lastSync ? new Date(s.lastSync).toLocaleString() : "not yet";
+  box.append(el("p", {},
+    `Signed in as ${account.username}. ` +
+    `OneDrive: ${SYNC_TEXT[s.state] ?? s.state}. Last synced: ${last}.`));
+  if (s.error && s.state !== "offline") box.append(el("p", { class: "sub" }, s.error));
+  box.append(...conflictRows(s, "OneDrive's"));
+
+  box.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => syncEngine?.sync() }, "Sync now"),
+    el("button", {
+      class: "action ghost",
+      onclick: async () => {
+        if (!confirm("Sign out of OneDrive? Nurseries stay on this computer; " +
+          "they stop syncing until you sign in again.")) return;
+        // Offer before stopping, while a final sync can still save edits.
+        const wipe = confirm("Also remove the nurseries from this computer? " +
+          "Choose this on a shared computer; they stay safe in your OneDrive.");
+        // Only nurseries whose latest content is on OneDrive are removed;
+        // unsynced edits and nurseries kept local at sign-in stay put.
+        // removeLocal also forgets them, or the next sign-in would treat
+        // them as deleted here and delete them from OneDrive too.
+        if (wipe && syncEngine) {
+          await syncEngine.sync();
+          syncEngine.removeLocal(syncEngine.safeToRemove());
+        }
+        stopSyncing();
+        try { await auth.signOut(); } catch { /* popup closed — still signed out here */ }
+        if (wipe) {
+          state = store.activeNursery();
+          const kept = store.listNurseries().filter((n) => n.code).length;
+          if (kept) {
+            alert(`${kept} nursery(s) were not safely on OneDrive and were ` +
+              "left on this computer so nothing is lost.");
+          }
+        }
+        render();
+      },
+    }, "Sign out")));
+  return box;
+}
+
+// ---------------------------------------------------------------- team folder
+
+const NAME_KEY = "ps-user-name";
+const folderMeta = folderSupported() ? idbMeta() : null;
+let folder = null;          // {dir, metaKey} once one is chosen
+
+/** Who this person is on the Overview. Asked once, kept in this browser. */
+function userName({ ask = false } = {}) {
+  const known = localStorage.getItem(NAME_KEY);
+  if (known || !ask) return known;
+  const typed = (prompt("Your name, as your team will see it on the Overview page:",
+    "") ?? "").trim();
+  if (typed) localStorage.setItem(NAME_KEY, typed);
+  return typed || null;
+}
+
+function startFolderSync() {
+  syncPlace = "Team folder";
+  startSync({
+    drive: createFolderDrive(folder.dir),
+    metaKey: folder.metaKey,
+    author: userName(),
+    where: "the team folder",
+  });
+}
+
+async function bootFolder() {
+  if (!folderMeta) return;
+  try {
+    folder = (await folderMeta.load()) ?? null;
+    if (!folder) return;
+    if (await canWrite(folder.dir, false)) startFolderSync();
+    else {
+      syncPlace = "Team folder";
+      syncStatus = { state: "reconnect", conflicts: [] };
+      updateSyncBadge();
+    }
+  } catch (err) {
+    syncStatus = { state: "error", error: err.message, conflicts: [] };
+    updateSyncBadge();
+  }
+  if (activeTab === "Home") render();
+}
+
+async function chooseFolder() {
+  const dir = await pickFolder();
+  if (!await canWrite(dir, true)) {
+    throw new Error("The browser was not allowed to save in that folder.");
+  }
+  // What was last agreed with one folder means nothing in another: there,
+  // every nursery would look deleted. A new folder starts a fresh record.
+  const same = folder && await folder.dir.isSameEntry(dir);
+  const metaKey = same ? folder.metaKey : `ps-folder-meta:${Date.now().toString(36)}`;
+  userName({ ask: true });
+  stopSyncing();
+  folder = { dir, metaKey };
+  await folderMeta.remember(folder);
+  startFolderSync();
+}
+
+/** Run an action from a click; closing a file or folder picker is not an error. */
+const fileAction = (fn) => async () => {
+  try {
+    await fn();
+  } catch (err) {
+    if (err.name !== "AbortError") alert(err.message);
+  }
+};
+
+function folderPanel() {
+  if (auth.syncConfigured()) return null;
+  const box = el("div", { class: "home-card" }, el("h3", {}, "Team folder"));
+  if (!folderMeta) return backupPanel(box);
+
+  const choose = (label, cls = "action") =>
+    el("button", { class: cls, onclick: fileAction(chooseFolder) }, label);
+
+  if (!folder) {
+    box.append(
+      el("p", {},
+        "Nurseries are saved in this browser only. To work with your team, " +
+        "choose the shared nursery folder that OneDrive syncs to this " +
+        "computer. Everyone who chooses that folder works on the same " +
+        "nurseries, and managers can follow them on the Overview page."),
+      el("div", { class: "btnrow" }, choose("Choose team folder…")));
+    return box;
+  }
+
+  const name = folder.dir.name;
+  if (syncStatus?.state === "reconnect") {
+    box.append(
+      el("p", {},
+        `The browser needs your OK each time the app is opened before it can ` +
+        `use the team folder (${name}). Your work is safe here meanwhile.`),
+      el("div", { class: "btnrow" },
+        el("button", {
+          class: "action",
+          onclick: fileAction(async () => {
+            if (await canWrite(folder.dir, true)) startFolderSync();
+          }),
+        }, `Reconnect to ${name}`),
+        choose("Choose a different folder…", "action ghost")));
+    return box;
+  }
+
+  const s = syncStatus ?? { state: "syncing", conflicts: [] };
+  const last = s.lastSync ? new Date(s.lastSync).toLocaleString() : "not yet";
+  box.append(el("p", {},
+    `Working in ${name} as ${userName() ?? "(no name)"}. ` +
+    `${SYNC_TEXT[s.state] ?? s.state}. Last synced: ${last}.`));
+  if (s.error) box.append(el("p", { class: "sub" }, s.error));
+  box.append(...conflictRows(s, "the team folder's"));
+
+  box.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => syncEngine?.sync() }, "Sync now"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        const typed = prompt("Your name, as your team will see it:", userName() ?? "");
+        if (!typed?.trim()) return;
+        localStorage.setItem(NAME_KEY, typed.trim());
+        startFolderSync();
+      },
+    }, "Change my name"),
+    choose("Choose a different folder…", "action ghost"),
+    el("button", {
+      class: "action ghost",
+      onclick: fileAction(async () => {
+        if (!confirm("Stop using the team folder? Nurseries stay on this " +
+          "computer, and the folder is left as it is.")) return;
+        stopSyncing();
+        folder = null;
+        await folderMeta.forget();
+        render();
+      }),
+    }, "Stop using team folder")));
+  return box;
+}
+
+const confirmReplace = async (codes) => confirm(
+  `The file has a different copy of ${codes.join(", ")}.\n\n` +
+  "Replace this computer's copy with the file's? Choose Cancel to leave " +
+  "everything as it is.");
+
+/** For browsers that cannot write to a folder: one backup file, by hand. */
+function backupPanel(box) {
+  const input = el("input", {
+    type: "file", accept: ".json,application/json", style: "display:none",
+    onchange: fileAction(async () => {
+      const file = input.files[0];
+      input.value = "";
+      if (!file) return;
+      const doc = parseFile(await file.text());
+      if (!doc) throw new Error("That file is empty.");
+      const clash = overwrittenCodes(store, doc);
+      if (clash.length && !await confirmReplace(clash)) return;
+      loadInto(store, doc);
+      state = store.activeNursery();
+      render();
+    }),
+  });
+  box.append(
+    el("p", {},
+      "This browser cannot work in a team folder, so nurseries are saved in " +
+      "this browser only. Open the app in Chrome or Edge to share them with " +
+      "your team, or download a backup now and then."),
+    el("div", { class: "btnrow" },
+      el("button", {
+        class: "action",
+        onclick: () => {
+          const text = serialise(store.snapshot());
+          const a = el("a", {
+            href: URL.createObjectURL(new Blob([text], { type: "application/json" })),
+            download: `Nursery Workbook backup ${todayISO()}.json`,
+          });
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        },
+      }, "Download backup"),
+      el("button", { class: "action ghost", onclick: () => input.click() },
+        "Restore from backup…"),
+      input));
+  return box;
+}
+
+// ---------------------------------------------------------------- overview
+//
+// Every nursery on one page, for a manager following the team. Content is
+// this browser's copies, which sync keeps current; who saved each last, and
+// when, is read from the shared files themselves.
+
+const MILESTONES = [
+  ["PRISM imported", (n) => n.prism.length > 0],
+  ["Field map", (n) => n.fieldMap.length > 0],
+  ["Replacements logged", (n) => n.replacements.length + n.plantingErrors.length > 0],
+  ["Updated from PRISM", (n) => n.updatedPrism.length > 0],
+];
+
+/** The latest growth stage with anything written against it on Operations. */
+function stageReached(nursery) {
+  const written = Object.entries(nursery.operations ?? {})
+    .filter(([, text]) => String(text ?? "").trim())
+    .map(([key]) => key.split("|")[0]);
+  return GROWTH_STAGES.map(([stage]) => stage)
+    .filter((stage) => written.includes(stage)).at(-1) ?? "";
+}
+
+// id -> {author, savedAt}. Reading every shared file is slow next to a
+// render, so it is cached briefly; each render after a sync would refetch.
+let teamInfo = new Map();
+let teamInfoAt = 0;
+let teamInfoLoading = false;
+
+function refreshTeamInfo() {
+  if (!syncDrive || teamInfoLoading || Date.now() - teamInfoAt < 15_000) return;
+  teamInfoLoading = true;
+  const drive = syncDrive;
+  (async () => {
+    const info = new Map();
+    for (const file of await drive.list()) {
+      try {
+        const body = await drive.download(file);
+        if (body?.id) info.set(body.id, { author: body.author, savedAt: body.savedAt });
+      } catch { /* an unreadable file is sync's to report, not the Overview's */ }
+    }
+    teamInfo = info;
+  })().catch(() => { /* offline: keep what was last read */ }).finally(() => {
+    teamInfoLoading = false;
+    teamInfoAt = Date.now();
+    if (activeTab === "Overview") render();
+  });
+}
+
+VIEWS.Overview = (main) => {
+  main.append(...pageHead("Nursery overview",
+    "Every nursery, where it is up to, and who last saved it."));
+
+  if (!syncDrive) {
+    main.append(el("div", { class: "note" },
+      "Not connected to a team folder, so only the nurseries on this " +
+      "computer are shown. Connect from the Home page to see the team's."));
+  }
+  refreshTeamInfo();
+
+  const all = store.snapshot();
+  const ids = Object.keys(all)
+    .filter((id) => all[id].code || all[id].prism.length)
+    .sort((a, b) => (all[a].code || "").localeCompare(all[b].code || ""));
+  if (!ids.length) {
+    main.append(emptyState("No nurseries yet."));
+    return;
+  }
+
+  const headers = ["Nursery", "Types", "Last saved by", "Last saved",
+    ...MILESTONES.map(([label]) => label), "Packets", "Field map rows",
+    "Replacements", "Planting errors", "Operations reached"];
+  const values = ids.map((id) => {
+    const n = all[id];
+    const info = teamInfo.get(id) ?? {};
+    return [
+      n.code || "(untitled)", n.types.join(", "), info.author ?? "",
+      info.savedAt ? new Date(info.savedAt).toLocaleString() : "",
+      ...MILESTONES.map(([, done]) => (done(n) ? "✓" : "")),
+      n.prism.length, n.fieldMap.length, n.replacements.length,
+      n.plantingErrors.length, stageReached(n),
+    ];
+  });
+
+  // The code opens the nursery; the rest is read-only here.
+  const rows = values.map((cells, i) => [
+    el("a", {
+      href: "#",
+      onclick: (e) => {
+        e.preventDefault();
+        store.switchNursery(ids[i]);
+        reloadActive();
+      },
+    }, cells[0]),
+    ...cells.slice(1),
+  ]);
+  const stageCol = headers.length - 1;
+  main.append(table(headers, rows));
+  // Colour the stage cell as the Operations tab does.
+  main.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const colour = STAGE_COLOURS.get(values[i][stageCol]);
+    if (colour) tr.children[stageCol].style.background = colour;
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action ghost",
+      onclick: () => { teamInfoAt = 0; syncEngine?.sync(); refreshTeamInfo(); },
+    }, "Refresh")));
+
+  registerSheet("Overview", () => ({
+    name: "Overview", headers, rows: values, colours: {}, styles: {},
+  }));
+};
+
+VIEWS.Home = (main) => {
+  main.append(...pageHead("Nursery Workflow",
+    "Run each step in order. The same steps as the workbook's Home tab."));
+
+  main.append(nurseryPicker());
+  const panel = syncPanel() ?? folderPanel();
+  if (panel) main.append(panel);
+
+  if (!state.code) {
+    main.append(el("div", { class: "note" },
+      "No nursery initialised yet — click ‘New nursery’ above to set " +
+      "the code and nursery type."));
+  }
+
+  const steps = [
+    ["1. Initialise from PRISM export",
+      "Set the nursery code, type and file name, then import the PRISM " +
+      "export file into Nursery site.",
+      () => { activeTab = "Nursery site"; render(); }],
+    ["2. Generate all workbook tabs",
+      "Builds Material Map, Field Map, Packet Prep and Nursery list from the " +
+      "imported data.",
+      generateAll],
+    ["3. Design Field Map",
+      "Enter planting dates and rows. Spike numbers and forward/reverse runs " +
+      "are assigned automatically.",
+      () => { activeTab = "Field Map"; render(); }],
+    ["4. Record replacements and planting errors",
+      "Replacements carry an original and a replaced entry; planting errors " +
+      "carry the original entry only.",
+      () => { activeTab = "Replacements"; render(); }],
+    ["5. Pull updated Nursery site from PRISM",
+      "Import the refreshed export, then build the Fieldbook from it.",
+      () => { activeTab = "Updated nursery site"; render(); }],
+  ];
+
+  for (const [title, desc, fn] of steps) {
+    main.append(el("div", { class: "home-card" },
+      el("h3", {}, title),
+      el("p", {}, desc),
+      el("button", { class: "action", onclick: fn }, "Go")));
+  }
+
+  main.append(el("h1", { style: "margin-top:26px;font-size:16px" }, "Status"));
+  main.append(el("div", { class: "kv" },
+    el("div", {}, "Nursery code"), el("div", {}, state.code || "—"),
+    el("div", {}, "Nursery types"), el("div", {}, state.types.join(", ") || "—"),
+    el("div", {}, "Planting dates"), el("div", {}, String(state.plantingDates)),
+    el("div", {}, "Packets in Nursery site"), el("div", {}, String(state.prism.length)),
+    el("div", {}, "Rows assigned in Field Map"), el("div", {}, String(state.fieldMap.length)),
+    el("div", {}, "Updated nursery site rows"), el("div", {}, String(state.updatedPrism.length)),
+    el("div", {}, "Replacements logged"), el("div", {}, String(state.replacements.length)),
+    el("div", {}, "Planting errors logged"), el("div", {}, String(state.plantingErrors.length)),
+    el("div", {}, "Nurseries stored"), el("div", {}, String(store.listNurseries().length))));
+};
+
+// Import the PRISM export straight from the downloaded file. Parsing happens
+// in the browser (prism-reader.js), so the app needs no server and can be
+// hosted as static files; CSV and TSV never load the spreadsheet library.
+async function importFile(file, key) {
+  const isText = /\.(csv|tsv|txt)$/i.test(file.name);
+  const data = await readPrism(file, isText ? null : await loadExcelJS());
+  if (!data.rows.length) {
+    throw new Error("The file parsed, but no data rows were found.");
+  }
+  state[key] = data.rows;
+  save();
+  return data;
+}
+
+function importView(main, title, subtitle, key) {
+  main.append(...pageHead(title, subtitle));
+  const rows = state[key];
+
+  const status = el("p", { class: "sub" }, "");
+  const picker = el("input", {
+    type: "file",
+    accept: ".xlsx,.xlsm,.csv,.tsv,.txt",
+    style: "display:none",
+    onchange: async (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      status.textContent = `Reading ${file.name}…`;
+      try {
+        const data = await importFile(file, key);
+        alert(`${data.count} packets read from “${data.sheet}”.`);
+        render();
+      } catch (err) {
+        status.textContent = "";
+        alert(`Could not import ${file.name}.\n\n${err.message}`);
+      } finally {
+        e.target.value = "";      // allow re-picking the same file
+      }
+    },
+  });
+
+  const drop = el("div", {
+    class: "empty",
+    style: "text-align:center;cursor:pointer",
+    onclick: () => picker.click(),
+    ondragover: (e) => { e.preventDefault(); drop.classList.add("dragging"); },
+    ondragleave: () => drop.classList.remove("dragging"),
+    ondrop: async (e) => {
+      e.preventDefault();
+      drop.classList.remove("dragging");
+      const file = e.dataTransfer.files[0];
+      if (!file) return;
+      status.textContent = `Reading ${file.name}…`;
+      try {
+        const data = await importFile(file, key);
+        alert(`${data.count} packets read from “${data.sheet}”.`);
+        render();
+      } catch (err) {
+        status.textContent = "";
+        alert(`Could not import ${file.name}.\n\n${err.message}`);
+      }
+    },
+  },
+    el("b", {}, "Choose the PRISM export"),
+    el("div", { style: "margin-top:6px" },
+      "Click to browse, or drag the file here — .xlsx, .xlsm, .csv or .tsv. " +
+      "The header row is found automatically, whether it sits at row 1 or row 5."));
+
+  main.append(picker, drop, status);
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => picker.click() },
+      "Choose file…"),
+    rows.length
+      ? el("button", {
+        class: "action ghost",
+        onclick: () => { state[key] = []; save(); render(); },
+      }, "Clear imported data")
+      : null));
+
+  if (!rows.length) {
+    main.append(emptyState("No data imported yet."));
+    return;
+  }
+  const cols = Object.keys(rows[0]).slice(0, 10);
+  main.append(el("p", { class: "sub" },
+    `${rows.length} rows imported — showing the first 50.`));
+  main.append(table(cols, rows.slice(0, 50).map((r) => cols.map((c) => r[c]))));
+}
+
+VIEWS["Nursery site"] = (main) => importView(main, "Nursery site",
+  "Import the PRISM export. This is the source for every generated tab.",
+  "prism");
+
+VIEWS["Updated nursery site"] = (main) => {
+  importView(main, "Updated nursery site",
+    "Import the re-downloaded PRISM file after the breeder applies " +
+    "replacements and errors.",
+    "updatedPrism");
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => {
+        if (!state.updatedPrism.length) {
+          alert("Import the updated PRISM export first.");
+          return;
+        }
+        activeTab = "Fieldbook";
+        render();
+      },
+    }, "Build Fieldbook from this tab")));
+};
+
+// Fields offered in the Material Map cell checkboxes. Anything PRISM supplies
+// can be shown; these are the ones worth defaulting to.
+const MAP_FIELDS = [
+  "Material ID", "Inbred Code", "Hybrid Code", "Source ID",
+  "Generation", "CMS reaction", "Pedigree",
+];
+const MAP_FIELDS_DEFAULT = ["Material ID", "Inbred Code", "Hybrid Code"];
+
+/**
+ * The field map as a map, not a table.
+ *
+ * Range numbers run down both sides and row numbers across top and bottom, as
+ * in the workbook. `cellText` decides what goes in each plot and `cellFill`
+ * what colour it is, so Material Map and Field Map share the same geometry.
+ */
+/**
+ * A plot map as an editable grid.
+ *
+ * Ranges run down, field rows across. Building it through grid() rather than
+ * as a plain table is what gives both maps the same editing, formatting and
+ * download the client asked for.
+ *
+ * `footer` adds labelled rows beneath the row numbers — Field Map uses them
+ * for the spike and run direction, which belong to the row rather than to
+ * each individual plot.
+ */
+function mapGrid({ id, cellText, cellFill, footer = [] }) {
+  const maxRange = Math.max(...state.prism.map((r) => num(r.Range)));
+  const maxRow = Math.max(...state.prism.map((r) => num(r.Row)));
+  const byPlot = new Map(
+    state.prism.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  const rowNums = Array.from({ length: maxRow }, (_, i) => i + 1);
+
+  const CORNER = "Rng \\ Row";
+  const columns = [
+    { key: CORNER, label: CORNER, type: "text", readOnly: true },
+    ...rowNums.map((w) => ({ key: String(w), type: "text" })),
+    { key: "Rng", type: "text", readOnly: true },
+  ];
+
+  // Ranges descend so the top range prints at the top, as in the workbook.
+  const rows = [];
+  for (let rng = maxRange; rng >= 1; rng--) {
+    const row = { __kind: "range", [CORNER]: rng, Rng: rng };
+    for (const w of rowNums) {
+      const record = byPlot.get(`${rng}:${w}`);
+      row[String(w)] = record ? cellText(record, rng, w) : "";
+    }
+    rows.push(row);
+  }
+
+  // Row numbers repeat along the foot, then any extra labelled rows.
+  const numbersRow = { __kind: "header", [CORNER]: CORNER, Rng: "Rng" };
+  for (const w of rowNums) numbersRow[String(w)] = String(w);
+  rows.push(numbersRow);
+
+  for (const { label, value } of footer) {
+    const row = { __kind: "footer", __label: label, [CORNER]: label, Rng: label };
+    for (const w of rowNums) row[String(w)] = value(w);
+    rows.push(row);
+  }
+
+  return grid({
+    id,
+    columns,
+    rows,
+    rowKey: (r, i) => (r.__kind === "range" ? `rng:${r.Rng}` : `${r.__kind}:${i}`),
+    owned: true,
+    onEdit: () => save(),
+    cellColour: (row, key) => {
+      if (row.__kind !== "range") return "#f2f4f7";
+      if (key === CORNER || key === "Rng") return "#f2f4f7";
+      return cellFill ? cellFill(num(row.Rng), num(key)) : null;
+    },
+  });
+}
+
+VIEWS["Material Map"] = (main) => {
+  main.append(...pageHead("Material Map",
+    "Range numbers down both sides, field rows across top and bottom."));
+  if (!state.prism.length) {
+    main.append(emptyState("Import Nursery site data first."));
+    return;
+  }
+
+  // Which fields appear in each cell is the user's choice, and it sticks.
+  const chosen = new Set(
+    state.mapFields?.length ? state.mapFields : MAP_FIELDS_DEFAULT);
+
+  const holder = el("div");
+  const draw = () => {
+    const keys = MAP_FIELDS.filter((k) => chosen.has(k));
+    const node = mapGrid({
+      id: "Material Map",
+      cellText: (r) => keys
+        .map((k) => String(r[k] ?? "").slice(0, 16))
+        .filter(Boolean).join("\n"),
+    });
+    registerSheet("Material Map", () => sheetOf("Material Map", node.gridApi));
+    holder.replaceChildren(node);
+  };
+
+  main.append(el("div", { class: "nursery-bar" },
+    el("label", {}, "Show in each cell"),
+    ...MAP_FIELDS.map((field) => {
+      const box = el("input", { type: "checkbox" });
+      box.checked = chosen.has(field);
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(field); else chosen.delete(field);
+        state.mapFields = [...chosen];
+        save();
+        draw();
+      });
+      return el("label", { class: "filter-row" }, box, el("span", {}, field));
+    })));
+
+  main.append(holder);
+  draw();
+};
+
+// One colour per planting date, so the map reads at a glance.
+const DOP_COLOURS = [
+  "#cfe2f3", "#d9ead3", "#fff2cc", "#f4cccc", "#e6d0f0",
+  "#d0e0e3", "#fce5cd", "#ead1dc",
+];
+
+VIEWS["Field Map"] = (main) => {
+  main.append(...pageHead("Field Map",
+    "Plot numbers in the grid; spike and run direction along the foot."));
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: fieldMapWizard },
+      "Set planting dates and rows"),
+    state.fieldMap.length
+      ? el("button", {
+        class: "action ghost",
+        onclick: () => {
+          if (!confirm("Clear the planting dates and row assignments?")) return;
+          state.fieldMap = [];
+          state.plantingDates = 1;
+          save();
+          render();
+        },
+      }, "Clear")
+      : null));
+
+  if (!state.prism.length) {
+    main.append(emptyState("Import Nursery site data first."));
+    return;
+  }
+
+  const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
+  const byRow = new Map(state.fieldMap.map((e) => [e.row, e]));
+  const colourFor = (dop) => DOP_COLOURS[dops.indexOf(dop) % DOP_COLOURS.length];
+
+  if (dops.length) {
+    main.append(el("p", { class: "sub" },
+      `${dops.length} planting date(s), ${state.fieldMap.length} rows assigned. ` +
+      `Seed qty/plot: ${state.seedQty || "\u2014"} g`));
+    // Legend, so the colours mean something without hovering.
+    main.append(el("div", { class: "nursery-bar" },
+      el("label", {}, "Planting dates"),
+      ...dops.map((dop, i) => el("span", { class: "legend-chip" },
+        el("span", {
+          class: "legend-swatch",
+          style: `background:${colourFor(dop)}`,
+        }),
+        `${i + 1}. ${dop}`))));
+  } else {
+    main.append(emptyState(
+      "No planting dates set yet. Spike numbers follow the 1,2,2,1 cycle and " +
+      "runs alternate every two rows, starting forward."));
+  }
+
+  // Plot numbers fill the cells; spike and run sit under the row numbers,
+  // where they belong — they describe the row, not each individual plot.
+  const node = mapGrid({
+    id: "Field Map",
+    cellText: (_r, rng, row) => `${rng}_${row}`,
+    cellFill: (_rng, row) => {
+      const hit = byRow.get(row);
+      return hit ? colourFor(hit.dop) : null;
+    },
+    footer: [
+      { label: "Spike", value: (row) => `S${spikeForRow(row)}` },
+      {
+        label: "F/R run",
+        value: (row) => (runDirection(row) === "forward" ? "\u25b6" : "\u25c0"),
+      },
+    ],
+  });
+  registerSheet("Field Map", () => sheetOf("Field Map", node.gridApi));
+  main.append(node);
+};
+
+async function fieldMapWizard() {
+  if (!state.prism.length) {
+    alert("Import Nursery site data first.");
+    return;
+  }
+  const n = num(prompt("How many planting dates?",
+    String(state.plantingDates || 2)));
+  if (n < 1) return;
+
+  const qty = prompt("Seed quantity per plot (grams):", state.seedQty || "");
+  if (qty === null) return;
+
+  const allRows = [...new Set(state.prism.map((r) => num(r.Row)))]
+    .filter((r) => r > 0).sort((a, b) => a - b);
+
+  const dopRows = [];
+  const dops = [];
+  for (let i = 1; i <= n; i++) {
+    // Picked from a calendar so every planting date is the same ISO shape —
+    // the Packet Prep split and the Nursery data rows both group on it.
+    // Picked from a calendar so every planting date is the same ISO shape —
+    // the Packet Prep split and the Nursery data rows both group on it.
+    const dop = await pickDate(`Date of planting ${i}`, dops[i - 2]);
+    if (!dop) return;
+    const already = new Set(dopRows.flat());
+    const picked = await pickRows(
+      `Rows for planting date ${i} (${dop})`, allRows, already);
+    if (!picked) return;
+    dops.push(dop);
+    dopRows.push(picked);
+  }
+
+  // A row in two planting dates would print packets onto the wrong split,
+  // so refuse rather than silently overwrite.
+  try {
+    assignSplits(dopRows);
+  } catch (e) {
+    alert(`${e.message}\n\nFix the row lists and run the wizard again.`);
+    return;
+  }
+
+  const out = [];
+  dopRows.forEach((rows, i) => {
+    for (const row of rows) {
+      out.push({
+        dop: dops[i],
+        row,
+        spike: spikeForRow(row),
+        run: runDirection(row),
+        qty,
+      });
+    }
+  });
+
+  state.fieldMap = out;
+  state.plantingDates = n;
+  state.seedQty = qty;
+  save();
+  alert(`${n} planting date(s) recorded, ${out.length} rows assigned.`);
+  render();
+}
+
+VIEWS["Nursery data"] = (main) => {
+  main.append(...pageHead("Nursery data",
+    "Printable front page. The right-hand column is filled in by hand."));
+  main.append(el("div",
+    { style: "font-weight:700;font-size:19px;margin:6px 0 14px" },
+    "R&D Fieldbook - Grain Sorghum"));
+  // "1st DOP and rows" etc. are filled from Field Map. The base spec names
+  // three; a nursery with more planting dates gets the extra labels appended
+  // rather than quietly losing a date.
+  const dops = [...new Set(state.fieldMap.map((e) => e.dop))];
+  const ordinal = (n) => {
+    const teens = n % 100 >= 11 && n % 100 <= 13;
+    const suffix = teens ? "th" : ({ 1: "st", 2: "nd", 3: "rd" }[n % 10] ?? "th");
+    return `${n}${suffix}`;
+  };
+  const labels = [...SPEC.nursery_data_labels];
+  for (let i = 4; i <= dops.length; i++) {
+    const label = `${ordinal(i)} DOP and rows`;
+    if (!labels.includes(label)) {
+      labels.splice(labels.indexOf("Tag rows"), 0, label);
+    }
+  }
+
+  const dopFor = (label) => {
+    const m = /^(\d+)(?:st|nd|rd|th) DOP and rows$/.exec(label);
+    if (!m) return null;
+    const dop = dops[Number(m[1]) - 1];
+    if (!dop) return "";
+    const rows = state.fieldMap.filter((e) => e.dop === dop)
+      .map((e) => e.row).sort((a, b) => a - b);
+    return `${dop} — rows ${rows.join(", ")}`;
+  };
+
+  const defaults = SPEC.nursery_data_defaults ?? {};
+  const isDate = (label) => /date/i.test(label);
+
+  const rows = labels.map((label) => {
+    const saved = state.nurseryData[label] ?? {};
+    const computed = dopFor(label);
+    return {
+      Item: label,
+      Value: saved.value ?? computed ?? defaults[label] ?? "",
+      Comments: saved.comment ?? "",
+    };
+  });
+
+  const node = grid({
+    id: "Nursery data",
+    columns: [
+      { key: "Item", type: "text", readOnly: true },
+      // Only the rows whose label mentions a date get a calendar — "Planter"
+      // and "Seeds/side" are on the same column but are not dates.
+      { key: "Value", type: "text", typeFor: (row) => (isDate(row.Item) ? "date" : "text") },
+      { key: "Comments", type: "multiline" },
+    ],
+    rows,
+    rowKey: (r) => r.Item,
+    owned: true,
+    onEdit: (row, key, value) => {
+      const entry = state.nurseryData[row.Item] ?? {};
+      if (key === "Value") entry.value = value;
+      if (key === "Comments") entry.comment = value;
+      state.nurseryData[row.Item] = entry;
+      save();
+    },
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action ghost", onclick: captureGps }, "Capture GPS"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        for (const [label, value] of Object.entries(defaults)) {
+          state.nurseryData[label] = {
+            ...(state.nurseryData[label] ?? {}), value,
+          };
+        }
+        save();
+        render();
+      },
+    }, "Restore defaults")));
+
+  registerSheet("Nursery data", () => sheetOf("Nursery data", node.gridApi));
+  main.append(node);
+};
+
+/** Write the device's coordinates into the GPS row; still editable after. */
+function captureGps() {
+  if (!navigator.geolocation) {
+    alert("This device has no location service. Type the coordinates in by hand.");
+    return;
+  }
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      const { latitude, longitude } = pos.coords;
+      const value = `${latitude.toFixed(6)}, ${longitude.toFixed(6)}`;
+      state.nurseryData["GPS coordinates"] = {
+        ...(state.nurseryData["GPS coordinates"] ?? {}), value,
+      };
+      save();
+      render();
+      alert(`GPS captured: ${value}`);
+    },
+    (err) => alert(
+      `Could not read the location (${err.message}).\n\n` +
+      "Type the coordinates in by hand instead."),
+    { enableHighAccuracy: true, timeout: 15000 });
+}
+
+VIEWS["Packet Prep"] = (main, tabName) => {
+  const splitNo = num(tabName.split(" ").pop()) || 1;
+  main.append(...pageHead(tabName,
+    `Packets for planting date ${splitNo}. ` +
+    "QR CODE column feeds the barcode printer."));
+
+  if (!state.prism.length) {
+    main.append(emptyState("Import Nursery site data first."));
+    return;
+  }
+
+  const packets = state.prism.filter((r) => splitForRow(num(r.Row)) === splitNo);
+
+  // Packets must come off the rack in the order the planter needs them, so
+  // the sheet is ordered before the rack numbers are handed out: rows
+  // descending, range descending on a forward row and ascending on a reverse
+  // one, then grouped with spike 1 ahead of spike 2. Ported from PP2026_Run.
+  const byPlot = new Map(
+    packets.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  const ordered = packetPrepOrder(
+    packets.map((r) => [num(r.Range), num(r.Row)]));
+
+  // Rack order then counts 1..n within each spike.
+  const seen = new Map();
+  const numbered = ordered.map(([rng, row]) => {
+    const spike = spikeForRow(row);
+    const seq = (seen.get(spike) ?? 0) + 1;
+    seen.set(spike, seq);
+    return { rng, row, spike, seq, record: byPlot.get(`${rng}:${row}`) ?? {} };
+  });
+
+  // Four digit columns, as the document shows: 7 -> 0 | 0 | 0 | 7. Widened
+  // only if a spike ever runs past 9999, so every value stays the same width.
+  const digitWidth = Math.max(4,
+    ...numbered.map((p) => String(p.seq).length));
+  const digitKeys = Array.from({ length: digitWidth }, (_, i) => `D${i + 1}`);
+
+  const rows = numbered.map(({ rng, row, spike, seq, record }) => {
+    const digits = rackDigits(seq, digitWidth);
+    return {
+      "Nursery name": state.code,
+      "QR CODE": qrText(record),
+      Range: rng,
+      Row: row,
+      Plot: `${rng}_${row}`,
+      "SPIKE#": spike,
+      "RACK ORDER": seq,
+      ...Object.fromEntries(digitKeys.map((k, i) => [k, digits[i] ?? ""])),
+      "Split no.": splitNo,
+      "Material ID": record["Material ID"] ?? "",
+      "Inbred Code": record["Inbred Code"] ?? "",
+      "Hybrid Code": record["Hybrid Code"] ?? "",
+      "Source ID": record["Source ID"] ?? "",
+      "CMS reaction": record["CMS reaction"] ?? "",
+      Generation: record.Generation ?? "",
+    };
+  });
+
+  const spikeCounts = [...seen.entries()].sort((a, b) => a[0] - b[0]);
+  main.append(el("p", { class: "sub" },
+    `${rows.length} packets in this split, racked in planting order. ` +
+    spikeCounts.map(([s, n]) => `Spike ${s}: ${n}`).join(", ") +
+    `. Rack order split into ${digitWidth} digit columns.`));
+
+  const node = grid({
+    id: tabName,
+    columns: [
+      { key: "Nursery name", type: "text" },
+      { key: "QR CODE", type: "text" },
+      { key: "Range", type: "number" },
+      { key: "Row", type: "number" },
+      { key: "Plot", type: "text" },
+      { key: "SPIKE#", type: "number" },
+      { key: "RACK ORDER", type: "number" },
+      // One column per digit, for the label template.
+      ...digitKeys.map((k, i) => ({
+        key: k, label: `Digit ${i + 1}`, type: "text",
+      })),
+      { key: "Split no.", type: "number" },
+      { key: "Material ID", type: "text" },
+      { key: "Inbred Code", type: "text" },
+      { key: "Hybrid Code", type: "text" },
+      { key: "Source ID", type: "text" },
+      { key: "CMS reaction", type: "text" },
+      { key: "Generation", type: "text" },
+    ],
+    rows,
+    rowKey: (r) => r.Plot,
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => runExport("Bartender export", () =>
+        exportBartender(state.code, tabName, node.gridApi)),
+    }, "Export for Bartender (Source ID Z→A)")));
+
+  registerSheet(tabName, () => sheetOf(tabName, node.gridApi));
+  main.append(node);
+};
+
+VIEWS["Nursery list"] = (main) => {
+  main.append(...pageHead("Nursery list",
+    "Unique materials from Nursery site, Source ID ascending."));
+  if (!state.prism.length) {
+    main.append(emptyState("Import Nursery site data first."));
+    return;
+  }
+
+  const counts = new Map();
+  for (const r of state.prism) {
+    const key = r["Source ID"] || "";
+    if (!key) continue;
+    const rec = counts.get(key)
+      || { repeats: 0, inbred: r["Inbred Code"], hybrid: r["Hybrid Code"] };
+    rec.repeats += 1;
+    counts.set(key, rec);
+  }
+  const entries = [...counts.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+
+  const dupInbred = duplicateSet(entries.map(([, v]) => v.inbred));
+  const dupHybrid = duplicateSet(entries.map(([, v]) => v.hybrid));
+  let showDups = false;
+
+  const rows = entries.map(([src, v]) => ({
+    "Source ID": src,
+    Repeats: v.repeats,
+    "Qty Required": (v.repeats * 1.4).toFixed(1),
+    "Inbred Code": v.inbred ?? "",
+    "Hybrid Code": v.hybrid ?? "",
+  }));
+
+  main.append(el("p", { class: "sub" },
+    `${rows.length} unique Source IDs. Click a column heading to sort, or the ` +
+    "▾ beside it to filter."));
+
+  const columns = [
+    { key: "Source ID", type: "text" },
+    { key: "Repeats", type: "number" },
+    // Derived, so editing Repeats updates it immediately. Seed quantity per
+    // plot comes from Field Map when it has been set, rather than a constant.
+    {
+      key: "Qty Required",
+      type: "text",
+      readOnly: true,
+      derived: (get) => qtyRequired(get("Repeats")),
+    },
+    { key: "Inbred Code", type: "text" },
+    { key: "Hybrid Code", type: "text" },
+  ];
+
+  const holder = el("div");
+  const draw = () => {
+    const node = grid({
+      id: "Nursery list",
+      columns,
+      rows,
+      // Source ID is unique here by construction, so it identifies the row.
+      rowKey: (r) => r["Source ID"],
+      cellColour: (row, key, value) => {
+        if (!showDups) return null;
+        if (key === "Inbred Code" && dupInbred.has(value)) return "#ffd9d9";
+        if (key === "Hybrid Code" && dupHybrid.has(value)) return "#ffd9d9";
+        return null;
+      },
+    });
+    // Registered while rendered so the whole-book export picks up the user's
+    // own sorting, filters and added columns.
+    registerSheet("Nursery list", () => sheetOf("Nursery list", node.gridApi));
+    holder.replaceChildren(node);
+  };
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => {
+        showDups = !showDups;
+        draw();
+        const n = dupInbred.size + dupHybrid.size;
+        if (showDups) {
+          alert(n
+            ? `${n} duplicated code value(s) highlighted.`
+            : "No duplicate Inbred or Hybrid codes found.");
+        }
+      },
+    }, "Check duplicate codes")));
+
+  main.append(holder);
+  draw();
+};
+
+// Replacements and Planting errors are the same log with a different column
+// set, so they share a renderer. `storeKey` picks which list is being edited.
+// The nine fields the client's export format wants for each entry, in order.
+const ENTRY_BLOCK = [
+  "QR Key", "Source ID", "Material ID", "Inbred Code",
+  "Experimental Hybrid Code", "Pedigree", "Generation", "CMS reaction",
+  "W/column",
+];
+
+/**
+ * Expand a scanned QR back into the full nine-column entry block.
+ *
+ * This is what lets the tab stay short. The client asked to drop Material ID,
+ * Source ID and the rest from the screen, but the export format still carries
+ * them — so they are looked up from the nursery data at export time rather
+ * than typed twice.
+ *
+ * W/column has no source in PRISM yet, so it exports blank.
+ */
+function entryBlockFor(qr) {
+  const payload = String(qr ?? "").trim();
+  if (!payload) return ENTRY_BLOCK.map(() => "");
+  const plot = payload.split(",")[0].trim();
+  const hit = state.prism.find((r) => plotOf(r) === plot)
+    || state.updatedPrism.find((r) => plotOf(r) === plot);
+  if (!hit) return [payload, ...ENTRY_BLOCK.slice(1).map(() => "")];
+  return [
+    payload,
+    hit["Source ID"] ?? "",
+    hit["Material ID"] ?? "",
+    hit["Inbred Code"] ?? "",
+    hit["Hybrid Code"] ?? "",
+    hit.Pedigree ?? "",
+    hit.Generation ?? "",
+    hit["CMS reaction"] ?? "",
+    hit["W/column"] ?? "",
+  ];
+}
+
+/** The banded sheet from Tab information.xlsx, for either log. */
+function logSheet(tabName, storeKey, withReplaced) {
+  const bands = withReplaced
+    ? [["Original entry", 9], ["Replaced entry", 9], ["Reason", 1]]
+    : [["Original entry", 9], ["Reason", 1]];
+  const headers = withReplaced
+    ? [...ENTRY_BLOCK, ...ENTRY_BLOCK, "Reason"]
+    : [...ENTRY_BLOCK, "Reason"];
+  const rows = state[storeKey].map((rec) => {
+    const original = entryBlockFor(rec[QR_ORIGINAL]);
+    const reason = rec.Reason ?? "";
+    return withReplaced
+      ? [...original, ...entryBlockFor(rec[QR_REPLACED]), reason]
+      : [...original, reason];
+  });
+  return { name: tabName, bands, headers, rows };
+}
+
+// Replacements and Planting errors are the same log with a different column
+// set, so they share a renderer.
+function logView(main, { tabName, title, subtitle, storeKey, columns,
+  withReplaced }) {
+  main.append(...pageHead(title, subtitle));
+
+  const blankRow = () => Object.fromEntries(columns.map((c) => [
+    c.key,
+    c.key === "Status" ? STATUS_DEFAULT : "",
+  ]));
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => { state[storeKey].push(blankRow()); save(); render(); },
+    }, "Add row"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => resolvePlots(storeKey),
+    }, "Read QR → Plot"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => runExport("Export", async () => {
+        const sheet = logSheet(tabName, storeKey, withReplaced);
+        if (!sheet.rows.length) {
+          alert(`Nothing logged on ${title} yet.`);
+          return;
+        }
+        await download(`${state.code || "nursery"} - ${tabName}`, [sheet]);
+      }),
+    }, "Export (client format)")));
+
+  // The export is always available from the button above, even when the tab
+  // is empty, so it is registered before the early return.
+  registerSheet(tabName, () => logSheet(tabName, storeKey, withReplaced));
+
+  if (!state[storeKey].length) {
+    main.append(emptyState(`Nothing logged on ${title}.`));
+    return;
+  }
+
+  main.append(grid({
+    id: tabName,
+    columns,
+    rows: state[storeKey],
+    // These rows have no natural key, so position is the identity — safe
+    // because the tab owns its data and nothing rebuilds it underneath.
+    rowKey: (_row, i) => `row:${i}`,
+    owned: true,
+    onEdit: () => save(),
+    onAddRow: () => { state[storeKey].push(blankRow()); save(); render(); },
+    onDeleteRow: (row) => {
+      const i = state[storeKey].indexOf(row);
+      if (i >= 0) state[storeKey].splice(i, 1);
+      save();
+      render();
+    },
+  }));
+}
+
+VIEWS.Replacements = (main) => logView(main, {
+  tabName: "Replacements",
+  title: "Replacements",
+  subtitle: "Scan the original entry and its replacement. The export expands " +
+    "each QR into the full nine-column entry block.",
+  storeKey: "replacements",
+  columns: REPLACEMENT_COLUMNS,
+  withReplaced: true,
+});
+
+VIEWS["Planting errors"] = (main) => logView(main, {
+  tabName: "Planting errors",
+  title: "Planting errors",
+  subtitle: "Original entry only — nothing was planted in its place.",
+  storeKey: "plantingErrors",
+  columns: PLANTING_ERROR_COLUMNS,
+  withReplaced: false,
+});
+
+// The QR payload leads with the plot, so a scan can fill the Plot column.
+// A value matching no plot is left blank and counted rather than guessed at.
+function resolvePlots(storeKey) {
+  let resolved = 0;
+  let unresolved = 0;
+  for (const rec of state[storeKey]) {
+    const payload = String(rec[QR_ORIGINAL] ?? "").trim();
+    if (!payload) continue;
+    const plot = payload.split(",")[0].trim();
+    const hit = state.prism.find((r) => plotOf(r) === plot);
+    if (hit) {
+      rec.Plot = plotOf(hit);
+      resolved += 1;
+    } else {
+      unresolved += 1;
+    }
+  }
+  save();
+  render();
+  alert(unresolved
+    ? `${resolved} scan(s) resolved.\n${unresolved} QR value(s) matched no ` +
+      "plot — those rows were left blank."
+    : `${resolved} scan(s) resolved to a plot.`);
+}
+
+/** Fieldbook rows in serpentine order, shared with Date recording. */
+function fieldbookRows() {
+  const src = state.updatedPrism;
+  const plots = src.map((r) => [num(r.Range), num(r.Row)]);
+  const byPlot = new Map(src.map((r) => [`${num(r.Range)}:${num(r.Row)}`, r]));
+  return serpentineByRange(plots).map(([rng, row]) => {
+    const r = byPlot.get(`${rng}:${row}`) || {};
+    return {
+      Range: rng,
+      Row: row,
+      "Material ID": r["Material ID"] ?? "",
+      "Source ID": r["Source ID"] ?? "",
+      "Inbred Code": r["Inbred Code"] ?? "",
+      "Hybrid Code": r["Hybrid Code"] ?? "",
+      Gen: r.Generation ?? "",
+      CMS: r["CMS reaction"] ?? "",
+      Plot: `${rng}_${row}`,
+      Comments: r.Comments ?? "",
+    };
+  });
+}
+
+/**
+ * Print the fieldbook and nothing else.
+ *
+ * The browser would otherwise print the whole page — navigation, toolbars and
+ * all. Marking the table printable and flagging the body lets the print
+ * stylesheet drop everything around it. Layout follows the client's Fieldbook
+ * VBA: landscape, bold centred headers, thin borders, and the header row
+ * repeated on every page. Duplex is a printer-driver setting and cannot be
+ * chosen from here.
+ */
+function printFieldbook() {
+  const table = $("#main").querySelector(".grid-wrap");
+  if (!table) {
+    alert("Nothing to print yet.");
+    return;
+  }
+  table.classList.add("printable");
+  document.body.classList.add("printing-tab");
+
+  const done = () => {
+    table.classList.remove("printable");
+    document.body.classList.remove("printing-tab");
+    window.removeEventListener("afterprint", done);
+  };
+  window.addEventListener("afterprint", done);
+  window.print();
+  // afterprint is unreliable in some browsers, so clean up regardless.
+  setTimeout(done, 1000);
+}
+
+VIEWS.Fieldbook = (main) => {
+  main.append(...pageHead("Fieldbook",
+    "Built from Updated nursery site, in serpentine order."));
+
+  if (!state.updatedPrism.length) {
+    main.append(emptyState(
+      "Import the updated PRISM export on the ‘Updated nursery site’ tab first."));
+    return;
+  }
+
+  // Print sits at the top, as asked — it is the reason this tab is opened.
+  main.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: printFieldbook }, "Print"),
+    isType("AB")
+      ? el("button", {
+        class: "action ghost",
+        onclick: () => { activeTab = "Date recording"; render(); },
+      }, "AB selection map")
+      : null));
+
+  const all = fieldbookRows();
+  let rangeQuery = "";
+  let rowQuery = "";
+  const holder = el("div");
+
+  // Range and Row are searched separately, and an empty box means "all" —
+  // so one box alone narrows to a whole bay or a whole row.
+  const draw = () => {
+    const rows = all.filter((r) =>
+      (!rangeQuery || String(r.Range) === rangeQuery)
+      && (!rowQuery || String(r.Row) === rowQuery));
+
+    const node = grid({
+      id: "Fieldbook",
+      columns: [
+        { key: "Range", type: "number" },
+        { key: "Row", type: "number" },
+        { key: "Material ID", type: "text" },
+        { key: "Source ID", type: "text" },
+        { key: "Inbred Code", type: "text" },
+        { key: "Hybrid Code", type: "text" },
+        { key: "Gen", type: "text" },
+        { key: "CMS", type: "text" },
+        { key: "Plot", type: "text" },
+        { key: "Comments", type: "multiline" },
+      ],
+      rows,
+      rowKey: (r) => r.Plot,
+      cellColour: (row) =>
+        (isType("AB") && String(row.CMS).toUpperCase() === "B"
+          ? "#e2f0d9" : null),
+    });
+    registerSheet("Fieldbook", () => sheetOf("Fieldbook", node.gridApi));
+
+    holder.replaceChildren(
+      el("p", { class: "sub" },
+        `${rows.length} of ${all.length} plots` +
+        (isType("AB") ? ". B lines shaded green." : ".")),
+      node);
+  };
+
+  const rangeBox = el("input", {
+    class: "f", type: "number", placeholder: "All ranges",
+    oninput: (e) => { rangeQuery = e.target.value.trim(); draw(); },
+  });
+  const rowBox = el("input", {
+    class: "f", type: "number", placeholder: "All rows",
+    oninput: (e) => { rowQuery = e.target.value.trim(); draw(); },
+  });
+
+  main.append(el("div", { class: "nursery-bar" },
+    el("label", {}, "Range"), rangeBox,
+    el("label", {}, "Row"), rowBox,
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        rangeBox.value = "";
+        rowBox.value = "";
+        rangeQuery = "";
+        rowQuery = "";
+        draw();
+      },
+    }, "Show all")));
+
+  main.append(holder);
+  draw();
+
+  main.append(el("div", { class: "note" },
+    "Printing: landscape A4, duplex flipped on the short edge, page numbers " +
+    "centred, file name top right. Duplex is a printer-driver setting — " +
+    "choose it in the print dialog."));
+};
+
+VIEWS["Date recording"] = (main) => {
+  main.append(...pageHead("Date recording",
+    "A-lines from the Fieldbook. S 1 to S 4 hold day-of-month numbers; " +
+    "the month is worked out from the recording start date."));
+
+  if (!state.updatedPrism.length) {
+    main.append(emptyState(
+      "Import the updated PRISM export on the ‘Updated nursery site’ tab first."));
+    return;
+  }
+
+  const src = aLineRows();
+  if (!src.length) {
+    main.append(emptyState(
+      "No A-lines in the Fieldbook — nothing to record selections against."));
+    return;
+  }
+
+  let mode = "vertical";
+  const holder = el("div");
+
+  const draw = () => {
+    const plots = src.map((r) => [num(r.Range), num(r.Row)]);
+    // Vertical goes between two rows at a time; horizontal walks bay by bay.
+    const order = mode === "vertical"
+      ? serpentineTwoRowBands(plots)
+      : serpentineByRange(plots);
+    const byPlot = new Map(src.map((r) => [`${r.Range}:${r.Row}`, r]));
+
+    const rows = order.map(([rng, row]) => {
+      const r = byPlot.get(`${rng}:${row}`) || {};
+      const stored = state.dateRecording?.[`${rng}_${row}`] ?? {};
+      const out = {
+        Group: bandForRow(row),
+        Range: rng,
+        Row: row,
+        "O/E": parityForRow(row),
+        "Material ID": r["Material ID"] ?? "",
+        "Source ID": r["Source ID"] ?? "",
+        Gen: r.Gen ?? "",
+        CMS: r.CMS ?? "",
+        "In. Code": r["Inbred Code"] ?? "",
+      };
+      for (const c of SELECTION_COLUMNS) {
+        out[c] = stored[c] ?? "";
+        out[`${c.replace(" ", "")} Month`] = monthLabel(out[c]);
+      }
+      return out;
+    });
+
+    const columns = [
+      { key: "Group", type: "number", readOnly: true },
+      { key: "Range", type: "number", readOnly: true },
+      { key: "Row", type: "number", readOnly: true },
+      { key: "O/E", type: "text", readOnly: true },
+      ...SELECTION_COLUMNS.flatMap((c) => [
+        { key: c, type: "number" },
+        // Derived, so read-only — editing it would not change the day it
+        // came from and the two would silently disagree.
+        { key: `${c.replace(" ", "")} Month`, type: "text", readOnly: true },
+      ]),
+      { key: "Material ID", type: "text", readOnly: true },
+      { key: "Source ID", type: "text", readOnly: true },
+      { key: "Gen", type: "text", readOnly: true },
+      { key: "CMS", type: "text", readOnly: true },
+      { key: "In. Code", type: "text", readOnly: true },
+    ];
+
+    const node = grid({
+      id: "Date recording",
+      columns,
+      rows,
+      rowKey: (r) => `${r.Range}_${r.Row}`,
+      owned: true,
+      onEdit: (row, key, value) => {
+        if (!SELECTION_COLUMNS.includes(key)) return;
+        const plot = `${row.Range}_${row.Row}`;
+        state.dateRecording[plot] = {
+          ...(state.dateRecording[plot] ?? {}), [key]: value,
+        };
+        save();
+      },
+    });
+    registerSheet("Date recording", () =>
+      sheetOf("Date recording", node.gridApi));
+
+    holder.replaceChildren(
+      el("p", { class: "sub" },
+        (mode === "vertical"
+          ? "Serpentine – Vertical: two rows together, snaking by range."
+          : "Serpentine – Horizontal: bay by bay.") +
+        ` ${rows.length} A-line plot(s).` +
+        (state.recordingStart
+          ? ` Recording started ${state.recordingStart}.`
+          : " Set the recording start date to fill in the months.")),
+      node);
+  };
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action",
+      onclick: () => { mode = "vertical"; draw(); },
+    }, "Serpentine – Vertical"),
+    el("button", {
+      class: "action",
+      onclick: () => { mode = "horizontal"; draw(); },
+    }, "Serpentine – Horizontal"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => pullOutBags(main),
+    }, "Pull out bags"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => generateTrend(main),
+    }, "Generate graph")));
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action ghost",
+      onclick: async () => {
+        const start = await pickDate("Recording start date",
+          state.recordingStart);
+        if (!start) return;
+        state.recordingStart = start;
+        save();
+        render();
+      },
+    }, state.recordingStart
+      ? `Recording start: ${state.recordingStart}`
+      : "Set recording start date")));
+
+  main.append(holder);
+  draw();
+};
+
+/** The month a bare day falls in, given the recording start date. */
+function monthLabel(day) {
+  if (!state.recordingStart) return "";
+  const [y, m, d] = state.recordingStart.split("-").map(Number);
+  const stamp = assignMonth(day, d, m, y);
+  return stamp ? MONTH_NAMES[stamp[1] - 1] : "";
+}
+
+/**
+ * Pull out bags: which B-lines to collect for a chosen set of days.
+ *
+ * Selections are recorded against the A-line, but the bags hang on its paired
+ * B-line — the row beside it in the same range. So the A-line's S 1..S 4 are
+ * copied across, then the days the user ticks are matched and the resulting
+ * B-lines listed in horizontal serpentine order, which is the order someone
+ * actually walks the field.
+ */
+function pullOutBags(main) {
+  const aLines = aLineRows();
+  if (!aLines.length) {
+    alert("No A-lines to pull bags for.");
+    return;
+  }
+
+  pickDays("Which recording days are you pulling bags for?").then((days) => {
+    if (!days || !days.length) return;
+    const wanted = new Set(days.map(Number));
+
+    // The B-line paired with an A-line is its neighbour in the same range.
+    const all = fieldbookRows();
+    const byPlot = new Map(all.map((r) => [`${r.Range}:${r.Row}`, r]));
+    const partnerOf = (a) =>
+      byPlot.get(`${a.Range}:${a.Row + 1}`)?.CMS?.toUpperCase() === "B"
+        ? byPlot.get(`${a.Range}:${a.Row + 1}`)
+        : (byPlot.get(`${a.Range}:${a.Row - 1}`)?.CMS?.toUpperCase() === "B"
+          ? byPlot.get(`${a.Range}:${a.Row - 1}`)
+          : null);
+
+    const hits = [];
+    const unpaired = [];
+    for (const a of aLines) {
+      const stored = state.dateRecording?.[`${a.Range}_${a.Row}`] ?? {};
+      const picked = SELECTION_COLUMNS
+        .filter((c) => wanted.has(Number(stored[c])))
+        .map((c) => `${c} = ${stored[c]}`);
+      if (!picked.length) continue;
+
+      const b = partnerOf(a);
+      if (!b) {
+        unpaired.push(`${a.Range}_${a.Row}`);
+        continue;
+      }
+      hits.push({ b, a, picked: picked.join(", ") });
+    }
+
+    if (!hits.length) {
+      alert("No selections recorded on those days.");
+      return;
+    }
+
+    // Horizontal serpentine, as the client asked — bay by bay.
+    const order = serpentineByRange(hits.map((h) => [h.b.Range, h.b.Row]));
+    const byB = new Map(hits.map((h) => [`${h.b.Range}:${h.b.Row}`, h]));
+    const rows = order
+      .map(([rng, row]) => byB.get(`${rng}:${row}`))
+      .filter(Boolean)
+      .map((h) => ({
+        Range: h.b.Range,
+        Row: h.b.Row,
+        Plot: h.b.Plot,
+        "Material ID": h.b["Material ID"],
+        "Source ID": h.b["Source ID"],
+        Gen: h.b.Gen,
+        "A-line plot": h.a.Plot,
+        Selection: h.picked,
+      }));
+
+    const node = grid({
+      id: "Pull out bags",
+      columns: [
+        { key: "Range", type: "number", readOnly: true },
+        { key: "Row", type: "number", readOnly: true },
+        { key: "Plot", type: "text", readOnly: true },
+        { key: "Material ID", type: "text", readOnly: true },
+        { key: "Source ID", type: "text", readOnly: true },
+        { key: "Gen", type: "text", readOnly: true },
+        { key: "A-line plot", type: "text", readOnly: true },
+        { key: "Selection", type: "text", readOnly: true },
+      ],
+      rows,
+      rowKey: (r) => r.Plot,
+    });
+
+    main.append(el("h1", { style: "margin-top:26px;font-size:16px" },
+      `Pull out bags — days ${days.join(", ")}`));
+    main.append(el("p", { class: "sub" },
+      `${rows.length} B-line bag(s) to pull, in walking order.` +
+      (unpaired.length
+        ? ` ${unpaired.length} A-line(s) had no paired B-line and were ` +
+          `skipped: ${unpaired.slice(0, 5).join(", ")}` +
+          (unpaired.length > 5 ? "…" : "")
+        : "")));
+    main.append(node);
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+}
+
+/** Tick days 1-31, as the client asked, rather than typing a range. */
+function pickDays(label) {
+  return new Promise((resolve) => {
+    const chosen = new Set();
+    const close = (value) => { backdrop.remove(); resolve(value); };
+
+    const boxes = Array.from({ length: 31 }, (_, i) => i + 1).map((day) => {
+      const box = el("input", { type: "checkbox" });
+      box.addEventListener("change", () => {
+        if (box.checked) chosen.add(day); else chosen.delete(day);
+      });
+      return el("label", { class: "day-box" }, box, el("span", {}, day));
+    });
+
+    const backdrop = el("div", { class: "modal-backdrop" },
+      el("div", { class: "modal", style: "max-width:420px" },
+        el("h3", {}, label),
+        el("div", { class: "day-grid" }, boxes),
+        el("div", { class: "btnrow", style: "margin:14px 0 0" },
+          el("button", {
+            class: "action",
+            onclick: () => close([...chosen].sort((a, b) => a - b)),
+          }, "Show bags"),
+          el("button", { class: "action ghost", onclick: () => close(null) },
+            "Cancel"))));
+
+    backdrop.addEventListener("mousedown", (e) => {
+      if (e.target === backdrop) close(null);
+    });
+    document.body.append(backdrop);
+  });
+}
+
+/**
+ * Generate graph: recordings per day, as a line per selection pass.
+ *
+ * Ported from GenerateS1S2TrendAnalysis. The VBA asks for the start year,
+ * month and day as three separate prompts; one calendar is the same answer.
+ */
+function generateTrend(main) {
+  if (!state.recordingStart) {
+    alert("Set the recording start date first — the months are worked out " +
+      "from it.");
+    return;
+  }
+  const [year, month, day] = state.recordingStart.split("-").map(Number);
+  if (year < 1900 || year > 2100) {
+    alert("Recording start year must be between 1900 and 2100.");
+    return;
+  }
+
+  const rows = aLineRows().map((r) =>
+    state.dateRecording?.[`${r.Range}_${r.Row}`] ?? {});
+  const series = trendCounts(rows, SELECTION_COLUMNS, day, month, year);
+
+  const recorded = series.reduce((n, [, counts]) =>
+    n + Object.values(counts).reduce((a, b) => a + b, 0), 0);
+  if (!recorded) {
+    alert("No selections recorded yet, so there is nothing to plot.");
+    return;
+  }
+
+  main.append(el("h1", { style: "margin-top:26px;font-size:16px" },
+    "S 1 – S 4 recording trend"));
+  main.append(trendChart(series));
+
+  const node = grid({
+    id: "Trend Analysis",
+    columns: [
+      { key: "Date", type: "text", readOnly: true },
+      ...SELECTION_COLUMNS.map((c) => ({
+        key: `${c} Count`, type: "number", readOnly: true,
+      })),
+    ],
+    rows: series.map(([[y, m, d], counts]) => ({
+      Date: `${String(d).padStart(2, "0")}-${MONTH_NAMES[m - 1]}-${y}`,
+      ...Object.fromEntries(
+        SELECTION_COLUMNS.map((c) => [`${c} Count`, counts[c]])),
+    })),
+    rowKey: (r) => r.Date,
+  });
+  registerSheet("Trend Analysis", () => sheetOf("Trend Analysis", node.gridApi));
+  main.append(node);
+  main.lastChild.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+/**
+ * The trend as inline SVG.
+ *
+ * Drawn by hand rather than pulled in as a chart library — the app ships
+ * offline with no build step, and this is one line per series.
+ */
+function trendChart(series) {
+  const W = 900;
+  const H = 320;
+  const PAD = { top: 16, right: 16, bottom: 54, left: 52 };
+  const plotW = W - PAD.left - PAD.right;
+  const plotH = H - PAD.top - PAD.bottom;
+
+  const maxCount = Math.max(1, ...series.flatMap(([, c]) =>
+    Object.values(c)));
+  const x = (i) => PAD.left
+    + (series.length > 1 ? (i / (series.length - 1)) * plotW : plotW / 2);
+  // Value axis starts at zero, as the VBA sets MinimumScale = 0.
+  const y = (v) => PAD.top + plotH - (v / maxCount) * plotH;
+
+  const svgEl = (tag, attrs = {}, ...kids) => {
+    const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) node.setAttribute(k, v);
+    for (const kid of kids.flat()) {
+      if (kid === null || kid === undefined) continue;
+      node.append(kid.nodeType ? kid : document.createTextNode(String(kid)));
+    }
+    return node;
+  };
+
+  const colours = ["#1f4e79", "#c00000", "#548235", "#bf8f00"];
+  const parts = [];
+
+  // Horizontal gridlines and the value axis.
+  const ticks = Math.min(maxCount, 5);
+  for (let t = 0; t <= ticks; t++) {
+    const v = Math.round((maxCount / ticks) * t);
+    parts.push(svgEl("line", {
+      x1: PAD.left, x2: W - PAD.right, y1: y(v), y2: y(v),
+      stroke: "#e5e7eb",
+    }));
+    parts.push(svgEl("text", {
+      x: PAD.left - 8, y: y(v) + 4, "text-anchor": "end",
+      "font-size": "11", fill: "#6b7280",
+    }, v));
+  }
+
+  // Date labels, thinned so they stay readable over a long season.
+  const step = Math.max(1, Math.ceil(series.length / 12));
+  series.forEach(([[, m, d]], i) => {
+    if (i % step) return;
+    parts.push(svgEl("text", {
+      x: x(i), y: H - PAD.bottom + 18, "text-anchor": "middle",
+      "font-size": "10", fill: "#6b7280",
+      transform: `rotate(-45 ${x(i)} ${H - PAD.bottom + 18})`,
+    }, `${d} ${MONTH_NAMES[m - 1]}`));
+  });
+
+  SELECTION_COLUMNS.forEach((column, ci) => {
+    const points = series.map(([, counts], i) => [x(i), y(counts[column])]);
+    if (!points.length) return;
+    parts.push(svgEl("polyline", {
+      fill: "none", stroke: colours[ci], "stroke-width": "2",
+      points: points.map(([px, py]) => `${px},${py}`).join(" "),
+    }));
+    // Markers, as the VBA uses xlLineMarkers.
+    for (const [px, py] of points) {
+      parts.push(svgEl("circle", { cx: px, cy: py, r: "2.5", fill: colours[ci] }));
+    }
+  });
+
+  const legend = el("div", { class: "chart-legend" },
+    SELECTION_COLUMNS.map((c, i) => el("span", { class: "legend-chip" },
+      el("span", {
+        class: "legend-swatch",
+        style: `background:${colours[i]}`,
+      }), c)));
+
+  const svg = svgEl("svg", {
+    viewBox: `0 0 ${W} ${H}`, width: "100%", role: "img",
+    "aria-label": "Recordings per day for each selection pass",
+  },
+  svgEl("line", {
+    x1: PAD.left, x2: PAD.left, y1: PAD.top, y2: H - PAD.bottom,
+    stroke: "#9ca3af",
+  }),
+  svgEl("line", {
+    x1: PAD.left, x2: W - PAD.right, y1: H - PAD.bottom, y2: H - PAD.bottom,
+    stroke: "#9ca3af",
+  }),
+  svgEl("text", {
+    x: W / 2, y: H - 6, "text-anchor": "middle", "font-size": "12",
+    fill: "#374151",
+  }, "Date"),
+  svgEl("text", {
+    x: 14, y: H / 2, "text-anchor": "middle", "font-size": "12",
+    fill: "#374151", transform: `rotate(-90 14 ${H / 2})`,
+  }, "Number of Records"),
+  parts);
+
+  return el("div", { class: "chart-wrap" }, svg, legend);
+}
+
+// Operations and Comments are the same shape: growth stages down the side,
+// groups across. Cells take multiple lines, and extra group columns can be
+// added from the grid toolbar.
+function groupedView(main, tabName, title, storeKey) {
+  main.append(...pageHead(title,
+    "Cells take multiple lines. Add group columns from the toolbar."));
+
+  // Stored as "<stage>|<group>", so the grid's row objects are built from the
+  // map on the way in and written back on the way out.
+  const rows = GROWTH_STAGES.map(([stage]) => {
+    const row = { Stage: stage };
+    for (const g of [1, 2, 3]) {
+      row[`Group ${g}`] = state[storeKey][`${stage}|${g}`] ?? "";
+    }
+    return row;
+  });
+
+  const columns = [
+    // The heading is deliberately blank — the stage names speak for themselves.
+    { key: "Stage", label: "", type: "text", readOnly: true },
+    { key: "Group 1", type: "multiline" },
+    { key: "Group 2", type: "multiline" },
+    { key: "Group 3", type: "multiline" },
+  ];
+
+  const node = grid({
+    id: tabName,
+    columns,
+    rows,
+    rowKey: (r) => r.Stage,
+    owned: true,
+    onEdit: (row, key, value) => {
+      const group = key.startsWith("Group ") ? key.slice(6) : null;
+      if (group) state[storeKey][`${row.Stage}|${group}`] = value;
+      save();
+    },
+    cellColour: (row, key) =>
+      (key === "Stage" ? STAGE_COLOURS.get(row.Stage) ?? null : null),
+  });
+
+  registerSheet(tabName, () => sheetOf(tabName, node.gridApi));
+  main.append(node);
+}
+
+VIEWS.Operations = (main) =>
+  groupedView(main, "Operations", "Operations Overview", "operations");
+VIEWS.Comments = (main) =>
+  groupedView(main, "Comments", "Field Comments", "comments");
+
+function viewMissing(main, name) {
+  main.append(...pageHead(name, "Nursery-type extra."));
+  main.append(emptyState(
+    `The ${name} tab is generated in the Excel workbook. It is not yet ` +
+    "implemented in the desktop app."));
+}
+
+// ---------------------------------------------------------------- actions
+
+function generateAll() {
+  if (!state.prism.length) {
+    alert("Import the PRISM export on the Nursery site tab first.");
+    return;
+  }
+  save();
+  alert(`${state.prism.length} packets read from PRISM.\n\n` +
+    "Material Map, Field Map, Packet Prep and Nursery list are built from " +
+    "this data and update live.\n\n" +
+    "Fieldbook is built later, from the Updated nursery site tab.");
+  activeTab = "Material Map";
+  render();
+}
+
+// Initialising always opens a *new* nursery. Editing the open one is what the
+// Rename action is for — before, this overwrote whatever was already loaded.
+function initNursery() {
+  const code = prompt("Enter the nursery code (e.g. AUGT1-26S-IMI):", "");
+  if (!code) return;
+  const types = prompt(
+    "Nursery type(s) — comma separated.\nOptions: " + SPEC.nursery_types.join(", "),
+    "Selection");
+  if (!types) return;
+  store.createNursery({
+    code: code.trim(),
+    types: types.split(",").map((s) => s.trim()).filter(Boolean),
+  });
+  reloadActive();
+}
+
+$("#btnExport").addEventListener("click", exportCurrentTab);
+$("#btnInit").addEventListener("click", initNursery);
+$("#btnReset").addEventListener("click", () => {
+  const name = state.code || "this untitled nursery";
+  if (!confirm(
+    `Clear the data in ${name}? Other nurseries on this machine are kept.`)) {
+    return;
+  }
+  store.deleteNursery(store.activeId());
+  reloadActive();
+});
+
+render();
+bootSync();
