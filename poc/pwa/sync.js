@@ -28,13 +28,17 @@ export const fileName = (id) => `${PREFIX}${id}.json`;
 // Ids become object keys, and a shared folder lets anyone add a file, so a
 // name like "nursery-__proto__.json" must not reach the store. Spaces and
 // brackets stay allowed: OneDrive names its conflict copies "… (1)".
+// Any name an object inherits ("toString", "__proto__", …) is refused, not
+// just a list of the famous ones.
 const SAFE_ID = /^[\w() -]+$/;
-const RESERVED = new Set(["__proto__", "constructor", "prototype"]);
 const idFromName = (name) => {
   if (!name.startsWith(PREFIX) || !name.endsWith(".json")) return null;
   const id = name.slice(PREFIX.length, -".json".length);
-  return SAFE_ID.test(id) && !RESERVED.has(id) ? id : null;
+  return SAFE_ID.test(id) && !(id in Object.prototype) ? id : null;
 };
+
+/** `obj[id]` only if `obj` really holds it — never something inherited. */
+const own = (obj, id) => (Object.hasOwn(obj, id) ? obj[id] : undefined);
 
 /** cyrb53 — a fast 53-bit string hash; enough to tell "changed" apart. */
 export function fingerprint(nursery) {
@@ -134,13 +138,15 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
     for (const id of ids) {
       if (conflicts.has(id)) continue;          // waiting on the user
       if (meta.localOnly?.includes(id)) continue;  // declined at first sign-in
-      const L = local[id];
+      const L = own(local, id);
       const R = remote.get(id);
-      const M = meta.files[id];
-      const lHash = L ? fingerprint(L) : null;
-      const dirty = Boolean(L) && (!M || lHash !== M.hash);
+      const M = own(meta.files, id);
 
       try {
+        // Inside the try, so one entry that cannot be read is skipped and
+        // reported rather than stopping every other nursery syncing.
+        const lHash = L ? fingerprint(L) : null;
+        const dirty = Boolean(L) && (!M || lHash !== M.hash);
         if (L && !R) {
           if (M && !dirty) {
             // Deleted on another device and untouched here: follow suit.
