@@ -41,7 +41,7 @@ def test_every_module_is_bundled_once_dependencies_first():
     assert order[-1] == "app.js"
     assert len(order) == len(set(order))
     assert order.index("store.js") < order.index("grid.js")
-    assert "file-save.js" in order
+    assert "folder-drive.js" in order
 
 
 def test_sync_is_always_off_in_the_single_file(html):

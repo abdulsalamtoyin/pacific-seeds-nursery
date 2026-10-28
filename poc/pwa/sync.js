@@ -56,9 +56,10 @@ export function fingerprint(nursery) {
  *                     belong to whoever used the computer before, so they go
  *                     to this account's OneDrive only if it resolves true;
  *                     otherwise they stay here, unsynced. Omitted = adopt.
+ * @param author       name written into each file this computer saves
  */
 export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta",
-  onEvent = () => {}, now = () => new Date(), confirmAdopt = null }) {
+  onEvent = () => {}, now = () => new Date(), confirmAdopt = null, author = null }) {
   const blankPrint = fingerprint(structuredClone(store.BLANK_NURSERY));
   const conflicts = new Map();
   let meta = loadMeta();
@@ -80,8 +81,9 @@ export function createSync({ store, drive, metaBackend, metaKey = "ps-sync-meta"
     onEvent({ ...status, conflicts: [...conflicts.values()] });
   }
 
+  // `author` is who saved this version — what the Overview shows a manager.
   const doc = (id, nursery) => ({
-    schema: SCHEMA, id, savedAt: now().toISOString(), nursery,
+    schema: SCHEMA, id, savedAt: now().toISOString(), author, nursery,
   });
 
   /**

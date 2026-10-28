@@ -23,9 +23,9 @@ import * as auth from "./auth.js";
 import { createDrive } from "./onedrive.js";
 import { createSync } from "./sync.js";
 import {
-  createFileSave, fileSaveSupported, browserPickers, idbMeta,
-  serialise, parseFile, overwrittenCodes, loadInto,
-} from "./file-save.js";
+  createFolderDrive, folderSupported, pickFolder, canWrite, idbMeta,
+} from "./folder-drive.js";
+import { serialise, parseFile, overwrittenCodes, loadInto } from "./backup.js";
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -145,7 +145,11 @@ function exportCurrentTab() {
       alert(`${activeTab} has no rows yet.`);
       return;
     }
-    await download(`${state.code || "nursery"} - ${activeTab}`, [sheet]);
+    // The Overview spans every nursery, so it is not named after the open one.
+    const file = activeTab === "Overview"
+      ? `Nursery overview ${todayISO()}`
+      : `${state.code || "nursery"} - ${activeTab}`;
+    await download(file, [sheet]);
   });
 }
 
@@ -349,6 +353,11 @@ function visibleTabs() {
 function renderNav() {
   const nav = $("#nav");
   nav.replaceChildren();
+  nav.append(el("div", { class: "group" }, "Team"));
+  nav.append(el("a", {
+    class: activeTab === "Overview" ? "active" : "",
+    onclick: () => { activeTab = "Overview"; render(); },
+  }, "Overview"));
   nav.append(el("div", { class: "group" }, "Workbook"));
   for (const name of visibleTabs()) {
     nav.append(el("a", {
@@ -361,7 +370,8 @@ function renderNav() {
 }
 
 function render() {
-  if (!visibleTabs().includes(activeTab)) activeTab = "Home";
+  // Overview is not a workbook tab, so the nursery's tab list never has it.
+  if (activeTab !== "Overview" && !visibleTabs().includes(activeTab)) activeTab = "Home";
   renderNav();
   const main = $("#main");
   main.replaceChildren();
@@ -413,15 +423,21 @@ function nurseryPicker() {
     }, "Delete"));
 }
 
-// ---------------------------------------------------------------- OneDrive
+// ---------------------------------------------------------------- sharing
 //
-// Off unless sync-config.js holds the organisation's app registration. When
-// on, the browser copy is still the working copy; sync.js copies it to and
-// from OneDrive › Apps › <app> in the background.
+// Nurseries are shared one of two ways, both run by sync.js with the browser
+// copy as the working copy:
+//   OneDrive  — Graph, when sync-config.js holds the organisation's app
+//               registration; files go to OneDrive › Apps › <app>.
+//   Team folder — otherwise (always in the single-file build): a SharePoint
+//               folder the OneDrive desktop app syncs to each computer,
+//               reached through folder-drive.js. No Azure involved.
 
 let syncEngine = null;
+let syncDrive = null;
 let stopSync = null;
 let syncStatus = null;
+let syncPlace = "OneDrive";
 
 const SYNC_TEXT = {
   idle: "synced",
@@ -430,6 +446,7 @@ const SYNC_TEXT = {
   conflict: "needs a decision (see Home)",
   signin: "sign in again (see Home)",
   signedout: "not signed in (see Home)",
+  reconnect: "click to reconnect (see Home)",
   error: "sync problem (see Home)",
 };
 
@@ -440,7 +457,7 @@ function updateSyncBadge() {
   const when = syncStatus.state === "idle" && syncStatus.lastSync
     ? ` ${new Date(syncStatus.lastSync).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
     : "";
-  badge.textContent = `OneDrive: ${SYNC_TEXT[syncStatus.state] ?? syncStatus.state}${when}`;
+  badge.textContent = `${syncPlace}: ${SYNC_TEXT[syncStatus.state] ?? syncStatus.state}${when}`;
 }
 
 function onSyncEvent(status) {
@@ -450,46 +467,71 @@ function onSyncEvent(status) {
   // putNursery replaced the open nursery in place, so `state` is still live,
   // but a deletion elsewhere can remove it — re-point to be safe.
   if (status.changedLocal) state = store.activeNursery();
-  if (status.changedLocal || activeTab === "Home") render();
+  if (status.changedLocal || ["Home", "Overview"].includes(activeTab)) render();
 }
 
-function startSync(account) {
+/** `where` names the destination in the question asked before first sync. */
+function startSync({ drive, metaKey, author = null, where }) {
   stopSync?.();
+  syncDrive = drive;
   syncEngine = createSync({
     store,
-    drive: createDrive({ getToken: auth.getToken }),
+    drive,
     metaBackend: localStorage,
-    metaKey: `ps-sync-meta:${account.homeAccountId}`,
+    metaKey,
+    author,
     onEvent: onSyncEvent,
     // A shared computer may hold someone else's nurseries; ask before they
-    // are copied into this person's OneDrive.
+    // are copied to this person's OneDrive or the team's folder.
     confirmAdopt: async (codes) => confirm(
       `This computer already has ${codes.length} nursery(s): ${codes.join(", ")}.\n\n` +
-      "Copy them to your OneDrive? Choose Cancel if they are not yours — " +
+      `Copy them to ${where}? Choose Cancel if they are not yours — ` +
       "they will stay on this computer and not sync."),
   });
   stopSync = syncEngine.start();
 }
 
+const startGraphSync = (account) => startSync({
+  drive: createDrive({ getToken: auth.getToken }),
+  metaKey: `ps-sync-meta:${account.homeAccountId}`,
+  author: account.username,
+  where: "your OneDrive",
+});
+
 function stopSyncing() {
   stopSync?.();
   stopSync = null;
   syncEngine = null;
+  syncDrive = null;
   syncStatus = null;
   updateSyncBadge();
 }
 
 async function bootSync() {
-  if (!auth.syncConfigured()) return;
+  if (!auth.syncConfigured()) return bootFolder();
   try {
     const account = await auth.initAuth();
-    if (account) startSync(account);
+    if (account) startGraphSync(account);
     else { syncStatus = { state: "signedout", conflicts: [] }; updateSyncBadge(); }
   } catch (err) {
     syncStatus = { state: "error", error: err.message, conflicts: [] };
     updateSyncBadge();
   }
   if (activeTab === "Home") render();
+}
+
+/** One row per conflicting nursery, with the three ways to settle it. */
+function conflictRows(s, theirs) {
+  return (s.conflicts || []).map((c) => {
+    const choose = (choice) => async () => {
+      try { await syncEngine.resolve(c.id, choice); } catch (err) { alert(err.message); }
+    };
+    return el("div", { class: "btnrow" },
+      el("span", {}, `${c.code} was changed here and on another computer.`),
+      el("button", { class: "action", onclick: choose("mine") }, "Keep this computer's"),
+      el("button", { class: "action ghost", onclick: choose("theirs") }, `Keep ${theirs}`),
+      el("button", { class: "action ghost", onclick: choose("both") }, "Keep both"));
+  });
 }
 
 function syncPanel() {
@@ -508,7 +550,7 @@ function syncPanel() {
         class: "action",
         onclick: async () => {
           try {
-            startSync(await auth.signIn());
+            startGraphSync(await auth.signIn());
           } catch (err) {
             alert(`Sign-in did not finish.\n\n${err.message}`);
           }
@@ -523,17 +565,7 @@ function syncPanel() {
     `Signed in as ${account.username}. ` +
     `OneDrive: ${SYNC_TEXT[s.state] ?? s.state}. Last synced: ${last}.`));
   if (s.error && s.state !== "offline") box.append(el("p", { class: "sub" }, s.error));
-
-  for (const c of s.conflicts || []) {
-    const choose = (choice) => async () => {
-      try { await syncEngine.resolve(c.id, choice); } catch (err) { alert(err.message); }
-    };
-    box.append(el("div", { class: "btnrow" },
-      el("span", {}, `${c.code} was changed here and on another computer.`),
-      el("button", { class: "action", onclick: choose("mine") }, "Keep this computer's"),
-      el("button", { class: "action ghost", onclick: choose("theirs") }, "Keep OneDrive's"),
-      el("button", { class: "action ghost", onclick: choose("both") }, "Keep both")));
-  }
+  box.append(...conflictRows(s, "OneDrive's"));
 
   box.append(el("div", { class: "btnrow" },
     el("button", { class: "action", onclick: () => syncEngine?.sync() }, "Sync now"),
@@ -569,50 +601,67 @@ function syncPanel() {
   return box;
 }
 
-// ---------------------------------------------------------------- save file
-//
-// Without sync configured (always the case in the single-file build) the
-// nurseries can be kept in a file in the user's OneDrive folder instead, and
-// the OneDrive desktop app uploads it. file-save.js has the rules. Browsers
-// that cannot write to a chosen file get download/restore of the same file.
+// ---------------------------------------------------------------- team folder
 
-let fileSave = null;
-let fileStatus = null;
+const NAME_KEY = "ps-user-name";
+const folderMeta = folderSupported() ? idbMeta() : null;
+let folder = null;          // {dir, metaKey} once one is chosen
 
-const FILE_TEXT = {
-  saving: "saving…",
-  saved: "saved",
-  reconnect: "click to keep saving (see Home)",
-  changed: "changed elsewhere (see Home)",
-  error: "save problem (see Home)",
-};
-
-const clock = (iso) =>
-  new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-
-function updateFileBadge() {
-  const badge = $("#syncBadge");
-  if (!badge) return;
-  const text = FILE_TEXT[fileStatus?.state];
-  if (!text) { badge.textContent = ""; return; }
-  const when = fileStatus.state === "saved" ? ` ${clock(fileStatus.lastSaved)}` : "";
-  badge.textContent = `Save file: ${text}${when}`;
+/** Who this person is on the Overview. Asked once, kept in this browser. */
+function userName({ ask = false } = {}) {
+  const known = localStorage.getItem(NAME_KEY);
+  if (known || !ask) return known;
+  const typed = (prompt("Your name, as your team will see it on the Overview page:",
+    "") ?? "").trim();
+  if (typed) localStorage.setItem(NAME_KEY, typed);
+  return typed || null;
 }
 
-function onFileEvent(status) {
-  fileStatus = status;
-  updateFileBadge();
-  // Nurseries came in from the file: re-point and redraw, as for sync.
-  if (status.changedLocal) state = store.activeNursery();
-  if (status.changedLocal || activeTab === "Home") render();
+function startFolderSync() {
+  syncPlace = "Team folder";
+  startSync({
+    drive: createFolderDrive(folder.dir),
+    metaKey: folder.metaKey,
+    author: userName(),
+    where: "the team folder",
+  });
 }
 
-const confirmReplace = async (codes) => confirm(
-  `The file has a different copy of ${codes.join(", ")}.\n\n` +
-  "Replace this computer's copy with the file's? Choose Cancel to leave " +
-  "everything as it is.");
+async function bootFolder() {
+  if (!folderMeta) return;
+  try {
+    folder = (await folderMeta.load()) ?? null;
+    if (!folder) return;
+    if (await canWrite(folder.dir, false)) startFolderSync();
+    else {
+      syncPlace = "Team folder";
+      syncStatus = { state: "reconnect", conflicts: [] };
+      updateSyncBadge();
+    }
+  } catch (err) {
+    syncStatus = { state: "error", error: err.message, conflicts: [] };
+    updateSyncBadge();
+  }
+  if (activeTab === "Home") render();
+}
 
-/** Run a file action from a click; closing the file picker is not an error. */
+async function chooseFolder() {
+  const dir = await pickFolder();
+  if (!await canWrite(dir, true)) {
+    throw new Error("The browser was not allowed to save in that folder.");
+  }
+  // What was last agreed with one folder means nothing in another: there,
+  // every nursery would look deleted. A new folder starts a fresh record.
+  const same = folder && await folder.dir.isSameEntry(dir);
+  const metaKey = same ? folder.metaKey : `ps-folder-meta:${Date.now().toString(36)}`;
+  userName({ ask: true });
+  stopSyncing();
+  folder = { dir, metaKey };
+  await folderMeta.remember(folder);
+  startFolderSync();
+}
+
+/** Run an action from a click; closing a file or folder picker is not an error. */
 const fileAction = (fn) => async () => {
   try {
     await fn();
@@ -621,88 +670,82 @@ const fileAction = (fn) => async () => {
   }
 };
 
-async function bootFileSave() {
-  if (auth.syncConfigured() || !fileSaveSupported()) return;
-  fileSave = createFileSave({
-    store, meta: idbMeta(), pickers: browserPickers,
-    onEvent: onFileEvent, confirmReplace,
-  });
-  try {
-    await fileSave.start();
-  } catch (err) {
-    onFileEvent({ state: "error", error: err.message });
-  }
-}
-
-function filePanel() {
+function folderPanel() {
   if (auth.syncConfigured()) return null;
-  const box = el("div", { class: "home-card" }, el("h3", {}, "Save file"));
-  if (!fileSave) return backupPanel(box);
+  const box = el("div", { class: "home-card" }, el("h3", {}, "Team folder"));
+  if (!folderMeta) return backupPanel(box);
 
-  const s = fileStatus ?? { state: "off" };
-  const name = s.fileName ?? "the save file";
-  const stop = el("button", {
-    class: "action ghost",
-    onclick: fileAction(async () => {
-      if (!confirm(`Stop saving to ${name}? Nurseries stay on this ` +
-        "computer, and the file is left as it is.")) return;
-      await fileSave.stop();
-    }),
-  }, "Stop saving to file");
-  const openOther = (label) => el("button", {
-    class: "action ghost", onclick: fileAction(() => fileSave.openExisting()),
-  }, label);
+  const choose = (label, cls = "action") =>
+    el("button", { class: cls, onclick: fileAction(chooseFolder) }, label);
 
-  if (s.state === "off") {
+  if (!folder) {
     box.append(
       el("p", {},
-        "Nurseries are saved in this browser only. Save them to a file in " +
-        "your OneDrive folder too, so they are backed up and can be opened " +
-        "on another computer. Already have a save file? Open it instead."),
-      el("div", { class: "btnrow" },
-        el("button", {
-          class: "action", onclick: fileAction(() => fileSave.chooseNew()),
-        }, "Save to a new file…"),
-        openOther("Open a save file…")));
-  } else if (s.state === "reconnect") {
-    box.append(
-      el("p", {},
-        `Nurseries are being saved to ${name}. The browser needs your OK ` +
-        "each time the app is opened before it can save there again."),
-      el("div", { class: "btnrow" },
-        el("button", {
-          class: "action", onclick: fileAction(() => fileSave.reconnect()),
-        }, `Keep saving to ${name}`),
-        stop));
-  } else if (s.state === "changed") {
-    const when = s.fileSavedAt ? ` at ${new Date(s.fileSavedAt).toLocaleString()}` : "";
-    box.append(
-      el("p", {},
-        `${name} was saved from another computer${when}. Nothing has been ` +
-        "saved here since, so neither copy is lost — choose which to keep."),
-      el("div", { class: "btnrow" },
-        el("button", {
-          class: "action", onclick: fileAction(() => fileSave.resolve("file")),
-        }, "Use the file's nurseries"),
-        el("button", {
-          class: "action ghost", onclick: fileAction(() => fileSave.resolve("mine")),
-        }, "Replace the file with this computer's"),
-        stop));
-  } else {
-    const last = s.lastSaved ? new Date(s.lastSaved).toLocaleString() : "not yet";
-    box.append(el("p", {}, `Saving to ${name}. Last saved: ${last}.`));
-    if (s.error) box.append(el("p", { class: "sub" }, s.error));
-    box.append(el("div", { class: "btnrow" },
-      el("button", {
-        class: "action", onclick: fileAction(() => fileSave.saveNow()),
-      }, "Save now"),
-      openOther("Open a different file…"),
-      stop));
+        "Nurseries are saved in this browser only. To work with your team, " +
+        "choose the shared nursery folder that OneDrive syncs to this " +
+        "computer. Everyone who chooses that folder works on the same " +
+        "nurseries, and managers can follow them on the Overview page."),
+      el("div", { class: "btnrow" }, choose("Choose team folder…")));
+    return box;
   }
+
+  const name = folder.dir.name;
+  if (syncStatus?.state === "reconnect") {
+    box.append(
+      el("p", {},
+        `The browser needs your OK each time the app is opened before it can ` +
+        `use the team folder (${name}). Your work is safe here meanwhile.`),
+      el("div", { class: "btnrow" },
+        el("button", {
+          class: "action",
+          onclick: fileAction(async () => {
+            if (await canWrite(folder.dir, true)) startFolderSync();
+          }),
+        }, `Reconnect to ${name}`),
+        choose("Choose a different folder…", "action ghost")));
+    return box;
+  }
+
+  const s = syncStatus ?? { state: "syncing", conflicts: [] };
+  const last = s.lastSync ? new Date(s.lastSync).toLocaleString() : "not yet";
+  box.append(el("p", {},
+    `Working in ${name} as ${userName() ?? "(no name)"}. ` +
+    `${SYNC_TEXT[s.state] ?? s.state}. Last synced: ${last}.`));
+  if (s.error) box.append(el("p", { class: "sub" }, s.error));
+  box.append(...conflictRows(s, "the team folder's"));
+
+  box.append(el("div", { class: "btnrow" },
+    el("button", { class: "action", onclick: () => syncEngine?.sync() }, "Sync now"),
+    el("button", {
+      class: "action ghost",
+      onclick: () => {
+        const typed = prompt("Your name, as your team will see it:", userName() ?? "");
+        if (!typed?.trim()) return;
+        localStorage.setItem(NAME_KEY, typed.trim());
+        startFolderSync();
+      },
+    }, "Change my name"),
+    choose("Choose a different folder…", "action ghost"),
+    el("button", {
+      class: "action ghost",
+      onclick: fileAction(async () => {
+        if (!confirm("Stop using the team folder? Nurseries stay on this " +
+          "computer, and the folder is left as it is.")) return;
+        stopSyncing();
+        folder = null;
+        await folderMeta.forget();
+        render();
+      }),
+    }, "Stop using team folder")));
   return box;
 }
 
-/** For browsers without file access: the same file, by download and upload. */
+const confirmReplace = async (codes) => confirm(
+  `The file has a different copy of ${codes.join(", ")}.\n\n` +
+  "Replace this computer's copy with the file's? Choose Cancel to leave " +
+  "everything as it is.");
+
+/** For browsers that cannot write to a folder: one backup file, by hand. */
 function backupPanel(box) {
   const input = el("input", {
     type: "file", accept: ".json,application/json", style: "display:none",
@@ -721,14 +764,14 @@ function backupPanel(box) {
   });
   box.append(
     el("p", {},
-      "This browser cannot keep saving to a file, so nurseries are saved in " +
-      "this browser only. Download a backup to your OneDrive folder now and " +
-      "then; Chrome or Edge can save there automatically."),
+      "This browser cannot work in a team folder, so nurseries are saved in " +
+      "this browser only. Open the app in Chrome or Edge to share them with " +
+      "your team, or download a backup now and then."),
     el("div", { class: "btnrow" },
       el("button", {
         class: "action",
         onclick: () => {
-          const text = serialise(store.snapshot(), "backup");
+          const text = serialise(store.snapshot());
           const a = el("a", {
             href: URL.createObjectURL(new Blob([text], { type: "application/json" })),
             download: `Nursery Workbook backup ${todayISO()}.json`,
@@ -743,12 +786,126 @@ function backupPanel(box) {
   return box;
 }
 
+// ---------------------------------------------------------------- overview
+//
+// Every nursery on one page, for a manager following the team. Content is
+// this browser's copies, which sync keeps current; who saved each last, and
+// when, is read from the shared files themselves.
+
+const MILESTONES = [
+  ["PRISM imported", (n) => n.prism.length > 0],
+  ["Field map", (n) => n.fieldMap.length > 0],
+  ["Replacements logged", (n) => n.replacements.length + n.plantingErrors.length > 0],
+  ["Updated from PRISM", (n) => n.updatedPrism.length > 0],
+];
+
+/** The latest growth stage with anything written against it on Operations. */
+function stageReached(nursery) {
+  const written = Object.entries(nursery.operations ?? {})
+    .filter(([, text]) => String(text ?? "").trim())
+    .map(([key]) => key.split("|")[0]);
+  return GROWTH_STAGES.map(([stage]) => stage)
+    .filter((stage) => written.includes(stage)).at(-1) ?? "";
+}
+
+// id -> {author, savedAt}. Reading every shared file is slow next to a
+// render, so it is cached briefly; each render after a sync would refetch.
+let teamInfo = new Map();
+let teamInfoAt = 0;
+let teamInfoLoading = false;
+
+function refreshTeamInfo() {
+  if (!syncDrive || teamInfoLoading || Date.now() - teamInfoAt < 15_000) return;
+  teamInfoLoading = true;
+  const drive = syncDrive;
+  (async () => {
+    const info = new Map();
+    for (const file of await drive.list()) {
+      try {
+        const body = await drive.download(file);
+        if (body?.id) info.set(body.id, { author: body.author, savedAt: body.savedAt });
+      } catch { /* an unreadable file is sync's to report, not the Overview's */ }
+    }
+    teamInfo = info;
+  })().catch(() => { /* offline: keep what was last read */ }).finally(() => {
+    teamInfoLoading = false;
+    teamInfoAt = Date.now();
+    if (activeTab === "Overview") render();
+  });
+}
+
+VIEWS.Overview = (main) => {
+  main.append(...pageHead("Nursery overview",
+    "Every nursery, where it is up to, and who last saved it."));
+
+  if (!syncDrive) {
+    main.append(el("div", { class: "note" },
+      "Not connected to a team folder, so only the nurseries on this " +
+      "computer are shown. Connect from the Home page to see the team's."));
+  }
+  refreshTeamInfo();
+
+  const all = store.snapshot();
+  const ids = Object.keys(all)
+    .filter((id) => all[id].code || all[id].prism.length)
+    .sort((a, b) => (all[a].code || "").localeCompare(all[b].code || ""));
+  if (!ids.length) {
+    main.append(emptyState("No nurseries yet."));
+    return;
+  }
+
+  const headers = ["Nursery", "Types", "Last saved by", "Last saved",
+    ...MILESTONES.map(([label]) => label), "Packets", "Field map rows",
+    "Replacements", "Planting errors", "Operations reached"];
+  const values = ids.map((id) => {
+    const n = all[id];
+    const info = teamInfo.get(id) ?? {};
+    return [
+      n.code || "(untitled)", n.types.join(", "), info.author ?? "",
+      info.savedAt ? new Date(info.savedAt).toLocaleString() : "",
+      ...MILESTONES.map(([, done]) => (done(n) ? "✓" : "")),
+      n.prism.length, n.fieldMap.length, n.replacements.length,
+      n.plantingErrors.length, stageReached(n),
+    ];
+  });
+
+  // The code opens the nursery; the rest is read-only here.
+  const rows = values.map((cells, i) => [
+    el("a", {
+      href: "#",
+      onclick: (e) => {
+        e.preventDefault();
+        store.switchNursery(ids[i]);
+        reloadActive();
+      },
+    }, cells[0]),
+    ...cells.slice(1),
+  ]);
+  const stageCol = headers.length - 1;
+  main.append(table(headers, rows));
+  // Colour the stage cell as the Operations tab does.
+  main.querySelectorAll("tbody tr").forEach((tr, i) => {
+    const colour = STAGE_COLOURS.get(values[i][stageCol]);
+    if (colour) tr.children[stageCol].style.background = colour;
+  });
+
+  main.append(el("div", { class: "btnrow" },
+    el("button", {
+      class: "action ghost",
+      onclick: () => { teamInfoAt = 0; syncEngine?.sync(); refreshTeamInfo(); },
+    }, "Refresh")));
+
+  registerSheet("Overview", () => ({
+    name: "Overview", headers, rows: values, colours: {}, styles: {},
+  }));
+};
+
 VIEWS.Home = (main) => {
   main.append(...pageHead("Nursery Workflow",
     "Run each step in order. The same steps as the workbook's Home tab."));
 
   main.append(nurseryPicker());
-  const panel = syncPanel() ?? filePanel();
+  const panel = syncPanel() ?? folderPanel();
   if (panel) main.append(panel);
 
   if (!state.code) {
@@ -2307,4 +2464,3 @@ $("#btnReset").addEventListener("click", () => {
 
 render();
 bootSync();
-bootFileSave();
